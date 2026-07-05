@@ -1,0 +1,16 @@
+"""服务层：汇总、绑定包导出 / 导入、HMAC 签名。"""
+
+from .bindle import export_bindle, import_bindle, inspect_bindle
+from .signing import sign_bytes, sign_file, verify
+from .summary import build_entry_summary, build_summary
+
+__all__ = [
+    "export_bindle",
+    "import_bindle",
+    "inspect_bindle",
+    "build_summary",
+    "build_entry_summary",
+    "sign_bytes",
+    "sign_file",
+    "verify",
+]

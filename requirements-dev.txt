@@ -1,0 +1,3 @@
+-r requirements.txt
+pytest>=8.0     # 测试
+# pyinstaller   # 打包（设计文档第 12 节阶段 9），到打包阶段再装

@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>理票 · Tidoc</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div id="app">
+    <!-- 顶栏：身份切换 + 抬头分区 -->
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark">理</span>
+        <div class="brand-text">
+          <div class="brand-name">理票 · Tidoc</div>
+          <div class="brand-sub">报账凭证整理</div>
+        </div>
+      </div>
+
+      <div class="profile-switch">
+        <label>当前身份</label>
+        <select id="profileSelect"></select>
+        <button id="manageProfilesBtn" class="btn ghost" title="管理身份">身份管理</button>
+      </div>
+
+      <div class="title-tabs" id="titleTabs">
+        <button class="title-tab active" data-title="">全部</button>
+        <button class="title-tab title-univ" data-title="北京理工大学">北京理工大学</button>
+        <button class="title-tab title-found" data-title="北京理工大学教育基金会">教育基金会</button>
+      </div>
+    </header>
+
+    <div class="body">
+      <!-- 左侧：筛选 + 操作 -->
+      <aside class="sidebar">
+        <button id="newEntryBtn" class="btn primary block">＋ 新建报账条目</button>
+
+        <div class="filter-group">
+          <div class="filter-title">状态</div>
+          <select id="filterStatus">
+            <option value="">全部状态</option>
+            <option value="draft">草稿</option>
+            <option value="partial">部分材料</option>
+            <option value="complete">完整</option>
+          </select>
+        </div>
+
+        <div class="filter-group">
+          <div class="filter-title">校验</div>
+          <select id="filterCheck">
+            <option value="">全部校验</option>
+            <option value="pass">通过</option>
+            <option value="warning">需确认</option>
+            <option value="blocked">严重差异</option>
+          </select>
+        </div>
+
+        <div class="filter-group">
+          <div class="filter-title">搜索</div>
+          <input id="filterKeyword" type="search" placeholder="发票号 / 销售方 / 抬头" />
+        </div>
+
+        <div class="filter-group">
+          <div class="filter-title">金额区间</div>
+          <div class="amount-range">
+            <input id="filterAmountMin" type="number" placeholder="最小" />
+            <span>—</span>
+            <input id="filterAmountMax" type="number" placeholder="最大" />
+          </div>
+        </div>
+
+        <div class="sidebar-bottom">
+          <button id="summaryBtn" class="btn ghost block">导出汇总信息</button>
+          <button id="exportBtn" class="btn ghost block">导出绑定包 .tidoc</button>
+          <button id="importBtn" class="btn ghost block">导入绑定包</button>
+        </div>
+      </aside>
+
+      <!-- 主区：条目列表 -->
+      <main class="content">
+        <div class="content-head">
+          <div class="stats" id="stats"></div>
+          <div class="batch-bar" id="batchBar" hidden>
+            <span id="selCount">已选 0 项</span>
+            <button id="batchExportBtn" class="btn small">导出所选</button>
+            <button id="batchDeleteBtn" class="btn small danger">删除所选</button>
+            <button id="clearSelBtn" class="btn small ghost">取消选择</button>
+          </div>
+        </div>
+        <div id="entryList" class="entry-list"></div>
+        <div id="emptyState" class="empty-state" hidden>
+          <div class="empty-icon">🧾</div>
+          <p>还没有报账条目</p>
+          <button class="btn primary" onclick="document.getElementById('newEntryBtn').click()">新建第一条</button>
+        </div>
+      </main>
+    </div>
+  </div>
+
+  <!-- 通用弹层挂载点 -->
+  <div id="modalRoot"></div>
+  <div id="toastRoot" class="toast-root"></div>
+
+  <script src="api.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

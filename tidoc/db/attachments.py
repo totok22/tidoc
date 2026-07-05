@@ -1,0 +1,114 @@
+"""附件（Attachment）仓库。设计文档第 5 节存储布局、8.2 上传。
+
+把用户选的文件复制进 attachments/<entry_id>/，用规范文件名保存，算 sha256。
+"""
+
+from __future__ import annotations
+
+import hashlib
+import shutil
+import uuid
+from datetime import datetime
+from pathlib import Path
+
+from .database import Database
+from .paths import DataRoot
+
+# 附件类型（设计文档第 5 节）
+TYPE_INVOICE_PDF = "invoice_pdf"
+TYPE_INVOICE_XML = "invoice_xml"
+TYPE_PAYMENT = "payment_screenshot"
+TYPE_INSPECTION = "inspection_pdf"
+TYPE_OTHER = "other"
+
+# 各类型的规范命名前缀
+_NAME_PREFIX = {
+    TYPE_INVOICE_PDF: "发票",
+    TYPE_INVOICE_XML: "发票",
+    TYPE_PAYMENT: "付款截图",
+    TYPE_INSPECTION: "查验单",
+    TYPE_OTHER: "附件",
+}
+
+
+def _now() -> str:
+    return datetime.now().isoformat(timespec="seconds")
+
+
+def _sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+class AttachmentRepo:
+    def __init__(self, db: Database, data_root: DataRoot):
+        self.db = db
+        self.data_root = data_root
+
+    def add(self, entry_id: str, src_path: str | Path, att_type: str, note: str = "") -> dict:
+        src = Path(src_path)
+        if not src.exists():
+            raise FileNotFoundError(f"文件不存在：{src}")
+        att_id = uuid.uuid4().hex
+        dest_dir = self.data_root.entry_dir(entry_id)
+        stored_name = self._unique_name(dest_dir, entry_id, att_type, src.suffix)
+        dest = dest_dir / stored_name
+        shutil.copy2(src, dest)
+        rel = f"{entry_id}/{stored_name}"
+        self.db.conn.execute(
+            """INSERT INTO attachments(id, entry_id, type, original_name, stored_path,
+               sha256, note, added_at) VALUES(?,?,?,?,?,?,?,?)""",
+            (att_id, entry_id, att_type, src.name, rel, _sha256(dest), note, _now()),
+        )
+        self.db.conn.commit()
+        return self.get(att_id)
+
+    def _unique_name(self, dest_dir: Path, entry_id: str, att_type: str, suffix: str) -> str:
+        prefix = _NAME_PREFIX.get(att_type, "附件")
+        # 付款截图可多张，编号；其余同类型也编号避免覆盖
+        existing = self.db.conn.execute(
+            "SELECT COUNT(*) c FROM attachments WHERE entry_id = ? AND type = ?",
+            (entry_id, att_type),
+        ).fetchone()["c"]
+        seq = existing + 1
+        name = f"{prefix}_{seq:02d}{suffix}"
+        while (dest_dir / name).exists():
+            seq += 1
+            name = f"{prefix}_{seq:02d}{suffix}"
+        return name
+
+    def get(self, att_id: str) -> dict:
+        row = self.db.conn.execute("SELECT * FROM attachments WHERE id = ?", (att_id,)).fetchone()
+        d = {k: row[k] for k in row.keys()} if row else {}
+        if d:
+            d["abs_path"] = str(self.data_root.attachments_dir / d["stored_path"])
+        return d
+
+    def list(self, entry_id: str) -> list[dict]:
+        rows = self.db.conn.execute(
+            "SELECT * FROM attachments WHERE entry_id = ? ORDER BY added_at", (entry_id,)
+        ).fetchall()
+        out = []
+        for row in rows:
+            d = {k: row[k] for k in row.keys()}
+            d["abs_path"] = str(self.data_root.attachments_dir / d["stored_path"])
+            out.append(d)
+        return out
+
+    def delete(self, att_id: str) -> None:
+        att = self.get(att_id)
+        if not att:
+            return
+        abs_path = Path(att["abs_path"])
+        if abs_path.exists():
+            abs_path.unlink()
+        self.db.conn.execute("DELETE FROM attachments WHERE id = ?", (att_id,))
+        self.db.conn.commit()
+
+    def set_note(self, att_id: str, note: str) -> dict:
+        self.db.conn.execute("UPDATE attachments SET note = ? WHERE id = ?", (note, att_id))
+        self.db.conn.commit()
+        return self.get(att_id)
