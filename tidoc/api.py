@@ -53,12 +53,12 @@ class Api:
         return self.profiles.list()
 
     @_guard
-    def create_profile(self, name, reviewer, is_default=False, **optional):
-        return self.profiles.create(name, reviewer, is_default, **optional)
+    def create_profile(self, name, reviewer, is_default=False, optional=None):
+        return self.profiles.create(name, reviewer, is_default, **(optional or {}))
 
     @_guard
-    def update_profile(self, profile_id, **fields):
-        return self.profiles.update(profile_id, **fields)
+    def update_profile(self, profile_id, fields=None):
+        return self.profiles.update(profile_id, **(fields or {}))
 
     @_guard
     def set_default_profile(self, profile_id):
@@ -105,8 +105,8 @@ class Api:
 
     # ------------------------------------------------------------ 条目管理
     @_guard
-    def list_entries(self, **filters):
-        return self.entries.list(**filters)
+    def list_entries(self, filters=None):
+        return self.entries.list(**(filters or {}))
 
     @_guard
     def get_entry(self, entry_id):
@@ -127,6 +127,9 @@ class Api:
 
     @_guard
     def set_meta(self, entry_id, category=None, tags=None):
+        if isinstance(category, dict):
+            tags = category.get("tags")
+            category = category.get("category")
         self.entries.set_meta(entry_id, category=category, tags=tags)
         return self.entries.get(entry_id)
 

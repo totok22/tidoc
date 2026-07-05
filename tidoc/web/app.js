@@ -1,14 +1,18 @@
-/* 理票 · Tidoc 前端主逻辑。 */
+/* 理票 · Tidoc 前端主逻辑 — 整理 / 筛选 / 便捷操作。 */
 
 const State = {
   profiles: [],
+  profileById: {},
   currentProfileId: null,
-  activeTitle: '',        // '' 全部 / 北京理工大学 / 北京理工大学教育基金会
+  activeTitle: '',
+  rail: 'all',
   entries: [],
   selected: new Set(),
+  density: 'comfortable',
 };
 
-const $ = (sel) => document.querySelector(sel);
+const $ = (sel, root = document) => root.querySelector(sel);
+const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 const el = (tag, cls, html) => {
   const n = document.createElement(tag);
   if (cls) n.className = cls;
@@ -21,12 +25,14 @@ const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, (c) => (
 function toast(msg, kind) {
   const t = el('div', 'toast' + (kind ? ' ' + kind : ''), esc(msg));
   $('#toastRoot').appendChild(t);
-  setTimeout(() => { t.style.opacity = '0'; setTimeout(() => t.remove(), 300); }, 2600);
+  setTimeout(() => { t.style.opacity = '0'; t.style.transition = 'opacity .25s'; setTimeout(() => t.remove(), 280); }, 2600);
 }
 
 const TITLE_CLASS = { '北京理工大学': 'univ', '北京理工大学教育基金会': 'found' };
+const TITLE_SHORT = { '北京理工大学': '北京理工大学', '北京理工大学教育基金会': '教育基金会' };
 const STATUS_LABEL = { draft: '草稿', partial: '部分材料', complete: '完整' };
-const CHECK_LABEL = { pass: '校验通过', warning: '需确认', blocked: '严重差异' };
+const STATUS_NEXT = { draft: 'partial', partial: 'complete', complete: 'draft' };
+const CHECK_LABEL = { pass: '校验通过', warning: '需确认', blocked: '问题严重' };
 const FIELD_LABEL = {
   paid_amount: '实付金额', actual_item_name: '实际物资名称', notes: '备注',
   invoice_no: '发票号码', total: '价税合计', buyer_name: '购买方抬头',
@@ -38,49 +44,108 @@ function fmtMoney(v) {
   const n = Number(v);
   return isNaN(n) ? v : '¥' + n.toFixed(2);
 }
+function initials(name) {
+  if (!name) return '—';
+  return Array.from(name).slice(0, 2).join('');
+}
+function baseName(p) { return String(p).split(/[/\\]/).pop(); }
+function dateShort(s) {
+  if (!s) return '无日期';
+  return s.length > 10 ? s.slice(0, 10) : s;
+}
+
+// inline SVG icons (no emoji)
+const I = {
+  pencil: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="m4 20 4-1 11-11-3-3L5 16l-1 4z"/><path d="m14 5 3 3"/></svg>',
+  note: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M5 4h14v16H5z"/><path d="M8 9h8M8 13h6M8 17h4"/></svg>',
+  box: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7l9-4 9 4-9 4-9-4z"/><path d="M3 7v10l9 4M21 7v10l-9 4M12 11v10"/></svg>',
+  pdf: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3h9l4 4v14H6z"/><path d="M15 3v4h4"/><text x="9" y="16" font-size="6" fill="currentColor" stroke="none" font-family="JetBrains Mono, monospace">PDF</text></svg>',
+  xml: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3h9l4 4v14H6z"/><path d="M15 3v4h4"/><path d="m9 12-2 2 2 2M13 12l2 2-2 2" stroke-width="1.5"/></svg>',
+  image: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="5" width="16" height="14" rx="2"/><circle cx="9" cy="10" r="1.4"/><path d="m4 17 5-4 4 3 3-2 4 4"/></svg>',
+  inspect: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="6"/><path d="m20 20-3.5-3.5M8 11h6"/></svg>',
+  search: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3-3"/></svg>',
+};
+function iconPencil(s) { return wrapSvg(I.pencil, s); }
+function iconNote(s) { return wrapSvg(I.note, s); }
+function iconBox(s) { return wrapSvg(I.box, s); }
+function iconPdf() { return I.pdf; }
+function iconXml() { return I.xml; }
+function iconImage() { return I.image; }
+function iconInspect() { return I.inspect; }
+function wrapSvg(svg, s) {
+  return svg.replace('<svg ', `<svg width="${s}" height="${s}" `);
+}
 
 // ------------------------------------------------------------------ 初始化
 async function init() {
-  await Api.ready();
   bindEvents();
   await loadProfiles();
   await refreshEntries();
+  showSearchHintIfEmpty();
 }
 
 async function loadProfiles() {
   State.profiles = await Api.listProfiles();
-  const sel = $('#profileSelect');
-  sel.innerHTML = '';
+  State.profileById = Object.fromEntries(State.profiles.map((p) => [p.id, p]));
+  renderProfileSelects();
   if (!State.profiles.length) {
-    // 无身份：引导创建
-    sel.innerHTML = '<option>（无身份）</option>';
     openProfileManager(true);
     return;
   }
-  State.profiles.forEach((p) => {
-    const o = el('option');
-    o.value = p.id;
-    o.textContent = `${p.name} → ${p.reviewer}` + (p.is_default ? ' ★' : '');
-    sel.appendChild(o);
-  });
   const def = State.profiles.find((p) => p.is_default) || State.profiles[0];
   State.currentProfileId = def.id;
-  sel.value = def.id;
+  renderProfilePill();
 }
 
-// ------------------------------------------------------------------ 列表
+function renderProfilePill() {
+  const p = State.profileById[State.currentProfileId];
+  if (!p) {
+    $('#profileName').textContent = '未选择';
+    $('#profileReviewer').textContent = '';
+    $('#profileAvatar').textContent = '—';
+    return;
+  }
+  $('#profileName').textContent = p.name;
+  $('#profileReviewer').textContent = '审核 · ' + p.reviewer + (p.is_default ? ' · 默认' : '');
+  $('#profileAvatar').textContent = initials(p.name);
+}
+
+function renderProfileSelects() {
+  const sel = $('#filterProfile');
+  sel.innerHTML = '<option value="">全部</option>';
+  State.profiles.forEach((p) => {
+    const o = el('option');
+    o.value = p.id; o.textContent = p.name;
+    sel.appendChild(o);
+  });
+}
+
+// ------------------------------------------------------------------ 筛选
 function currentFilters() {
   const f = { title: State.activeTitle || undefined };
   const status = $('#filterStatus').value;
   const check = $('#filterCheck').value;
+  const profile = $('#filterProfile').value;
   const kw = $('#filterKeyword').value.trim();
   const amin = $('#filterAmountMin').value;
   const amax = $('#filterAmountMax').value;
+  const dfrom = $('#filterDateFrom').value;
+  const dto = $('#filterDateTo').value;
+  const sort = $('#sortSelect').value;
+
+  if (State.rail === 'draft') f.status = 'draft';
+  else if (State.rail === 'warn') f.check_status = 'warning';
+  else if (State.rail === 'modified') f.modified_only = true;
+
   if (status) f.status = status;
   if (check) f.check_status = check;
+  if (profile) f.profile_id = profile;
   if (kw) f.keyword = kw;
   if (amin) f.amount_min = amin;
   if (amax) f.amount_max = amax;
+  if (dfrom) f.date_from = dfrom;
+  if (dto) f.date_to = dto;
+  if (sort) f.sort = sort;
   return f;
 }
 
@@ -92,23 +157,38 @@ async function refreshEntries() {
     State.entries = [];
   }
   renderEntries();
+  renderActiveFilters();
 }
 
+// ------------------------------------------------------------------ 渲染列表
 function renderEntries() {
   const list = $('#entryList');
+  list.dataset.density = State.density;
   list.innerHTML = '';
   const empty = $('#emptyState');
-  empty.hidden = State.entries.length > 0;
+  const emptyAll = State.entries.length === 0;
 
-  let sum = 0;
+  let sum = 0, paidSum = 0, modifiedCount = 0;
   State.entries.forEach((e) => {
     sum += Number(e.total) || 0;
+    const fp = e.fields && e.fields.paid_amount ? Number(e.fields.paid_amount.current) : 0;
+    paidSum += isNaN(fp) ? 0 : fp;
+    if (e.modified_fields && e.modified_fields.length) modifiedCount++;
     list.appendChild(entryCard(e));
   });
 
-  $('#stats').textContent =
-    `共 ${State.entries.length} 条 · 合计 ${fmtMoney(sum)}`;
-  updateBatchBar();
+  $('#stats').innerHTML = emptyAll
+    ? ''
+    : `<span><b>${State.entries.length}</b> 条</span>
+       <span class="sep">·</span>
+       <span>合计 <b class="stats-sum">${fmtMoney(sum)}</b></span>
+       ${paidSum ? `<span class="sep">·</span><span>实付 <b style="color:var(--pass)">${fmtMoney(paidSum)}</b></span>` : ''}
+       ${modifiedCount ? `<span class="sep">·</span><span>已改 <b>${modifiedCount}</b></span>` : ''}`;
+
+  empty.hidden = !emptyAll;
+  if (emptyAll) renderEmptyState();
+  $('#selectionBar').classList.toggle('hidden', State.selected.size === 0);
+  $('#selCount').textContent = `已选 ${State.selected.size}`;
 }
 
 function entryCard(e) {
@@ -118,37 +198,119 @@ function entryCard(e) {
 
   const check = el('div', 'entry-check');
   const cb = el('input');
-  cb.type = 'checkbox';
-  cb.checked = State.selected.has(e.id);
+  cb.type = 'checkbox'; cb.checked = State.selected.has(e.id);
   cb.onclick = (ev) => { ev.stopPropagation(); toggleSelect(e.id); };
   check.appendChild(cb);
 
-  const chip = e.title
-    ? `<span class="title-chip ${tcls}">${esc(e.title === '北京理工大学教育基金会' ? '教育基金会' : e.title)}</span>`
-    : '';
+  const stripe = el('div', 'entry-stripe');
+
+  const chip = e.title ? `<span class="title-chip ${tcls}">${esc(TITLE_SHORT[e.title] || e.title)}</span>` : '';
   const modified = (e.modified_fields && e.modified_fields.length)
-    ? `<span class="badge modified" title="有 ${e.modified_fields.length} 个字段被人工修改">✎ 已修改</span>` : '';
+    ? `<span class="badge modified" title="有 ${e.modified_fields.length} 个字段被人工修改">${iconPencil(11)}已改 ${e.modified_fields.length}</span>` : '';
+  const checkBadge = e.check_status ? `<span class="badge ${e.check_status}">${CHECK_LABEL[e.check_status] || ''}</span>` : '';
+  const statusBadge = `<span class="badge status-${e.status}">${STATUS_LABEL[e.status] || e.status}</span>`;
+
+  const fields = e.fields || {};
+  const notesCur = fields.notes ? fields.notes.current : '';
+  const actualCur = fields.actual_item_name ? fields.actual_item_name.current : '';
+  const paidCur = fields.paid_amount ? fields.paid_amount.current : '';
+
+  const notesPreview = notesCur
+    ? `<span class="notes-preview" title="${esc(notesCur)}">${iconNote(12)}${esc(notesCur)}</span>`
+    : (actualCur ? `<span class="notes-preview">${iconBox(12)}${esc(actualCur)}</span>` : '');
 
   const main = el('div', 'entry-main', `
     <div class="entry-line1">
       ${chip}
       <span class="entry-seller">${esc(e.seller || '（未识别销售方）')}</span>
-      <span class="badge status-${e.status}">${STATUS_LABEL[e.status] || e.status}</span>
-      <span class="badge ${e.check_status}">${CHECK_LABEL[e.check_status] || e.check_status}</span>
+      ${statusBadge}
+      ${checkBadge}
       ${modified}
     </div>
     <div class="entry-line2">
-      <span>发票号 ${esc(e.invoice_no || '—')}</span>
-      <span>${esc(e.invoice_date || '无日期')}</span>
+      <span class="mono">${esc(e.invoice_no || '无发票号')}</span>
+      <span>${esc(dateShort(e.invoice_date))}</span>
       <span>附件 ${e.attachment_count || 0}</span>
+      ${notesPreview}
     </div>`);
 
-  const right = el('div', 'entry-right', `
-    <div class="entry-total">${fmtMoney(e.total)}</div>`);
+  const right = el('div', 'entry-right');
+  right.innerHTML = `
+    <div class="entry-total">${fmtMoney(e.total)}</div>
+    ${paidCur ? `<div class="entry-paid">实付 <b>${fmtMoney(paidCur)}</b></div>` : ''}
+    <div class="entry-quick">
+      <button data-quick="open" title="查看详情">详情</button>
+      <button data-quick="status" title="切换状态">${STATUS_LABEL[e.status]}</button>
+      <button data-quick="note" title="追加备注">备注</button>
+      <button data-quick="del" class="danger" title="删除">删</button>
+    </div>`;
+  right.querySelectorAll('[data-quick]').forEach((b) => {
+    b.onclick = (ev) => {
+      ev.stopPropagation();
+      const a = b.dataset.quick;
+      if (a === 'open') openEntryDetail(e.id);
+      else if (a === 'status') quickCycleStatus(e);
+      else if (a === 'note') quickNoteFlow(e);
+      else if (a === 'del') quickDelete(e);
+    };
+  });
 
-  card.append(check, main, right);
+  card.append(check, stripe, main, right);
   card.onclick = () => openEntryDetail(e.id);
   return card;
+}
+
+function renderEmptyState() {
+  const hasFilter = hasAnyFilter();
+  const illus = $('#emptyIllus');
+  if (hasFilter) {
+    illus.innerHTML = `<svg viewBox="0 0 48 48" width="44" height="44" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="21" cy="21" r="13"/><path d="m31 31 7 7M16 21h10M21 16v10"/></svg>`;
+    $('#emptyTitle').textContent = '没有匹配的条目';
+    $('#emptySub').textContent = '清掉一些筛选，或换个关键词、抬头。';
+    $('#emptyNew').textContent = '清空筛选';
+    $('#emptyNew').onclick = () => clearAllFilters();
+  } else {
+    illus.innerHTML = `<svg viewBox="0 0 48 48" width="42" height="42" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M9 14h22l6 6v22a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2V16a2 2 0 0 1 2-2z"/><path d="M31 14v6h6M14 26h16M14 32h12M14 38h8"/><path d="M9 14l3-5h18l3 5" opacity=".6"/></svg>`;
+    $('#emptyTitle').textContent = '还没有报账条目';
+    $('#emptySub').textContent = '上传一张发票，开始整理报账凭证。';
+    $('#emptyNew').textContent = '新建第一条';
+    $('#emptyNew').onclick = () => openNewEntry();
+  }
+}
+
+function renderActiveFilters() {
+  const wrap = $('#activeFilters');
+  const chips = [];
+  const mkChip = (label, onClear) => {
+    const c = el('span', 'filter-chip', `<span>${esc(label)}</span>`);
+    const x = el('button', null, '×');
+    x.onclick = onClear; c.appendChild(x);
+    chips.push(c);
+  };
+  if ($('#filterStatus').value) mkChip('状态：' + STATUS_LABEL[$('#filterStatus').value], () => { $('#filterStatus').value = ''; refreshEntries(); });
+  if ($('#filterCheck').value) mkChip('校验：' + CHECK_LABEL[$('#filterCheck').value], () => { $('#filterCheck').value = ''; refreshEntries(); });
+  if ($('#filterProfile').value) mkChip('报账人：' + (State.profileById[$('#filterProfile').value]?.name || ''), () => { $('#filterProfile').value = ''; refreshEntries(); });
+  if ($('#filterKeyword').value) mkChip('搜索：' + $('#filterKeyword').value, () => { $('#filterKeyword').value = ''; refreshEntries(); });
+  if ($('#filterAmountMin').value || $('#filterAmountMax').value) mkChip(`金额 ${$('#filterAmountMin').value || '∞'}–${$('#filterAmountMax').value || '∞'}`, () => { $('#filterAmountMin').value = ''; $('#filterAmountMax').value = ''; refreshEntries(); });
+  if ($('#filterDateFrom').value || $('#filterDateTo').value) mkChip(`日期 ${$('#filterDateFrom').value || '…'}–${$('#filterDateTo').value || '…'}`, () => { $('#filterDateFrom').value = ''; $('#filterDateTo').value = ''; refreshEntries(); });
+
+  wrap.innerHTML = '';
+  if (!chips.length) { wrap.classList.add('hidden'); return; }
+  wrap.classList.remove('hidden');
+  chips.forEach((c) => wrap.appendChild(c));
+  $('#advancedDot').classList.toggle('hidden', !chips.length);
+}
+
+function hasAnyFilter() {
+  return !!($('#filterStatus').value || $('#filterCheck').value || $('#filterProfile').value ||
+    $('#filterKeyword').value || $('#filterAmountMin').value || $('#filterAmountMax').value ||
+    $('#filterDateFrom').value || $('#filterDateTo').value ||
+    State.activeTitle || State.rail !== 'all');
+}
+
+function showSearchHintIfEmpty() {
+  const kb = $('#searchKbd');
+  kb.hidden = !!$('#filterKeyword').value;
 }
 
 // ------------------------------------------------------------------ 选择 / 批量
@@ -157,23 +319,67 @@ function toggleSelect(id) {
   else State.selected.add(id);
   renderEntries();
 }
-function updateBatchBar() {
-  const bar = $('#batchBar');
-  bar.hidden = State.selected.size === 0;
-  $('#selCount').textContent = `已选 ${State.selected.size} 项`;
+async function selectAllVisible() {
+  State.entries.forEach((e) => State.selected.add(e.id));
+  renderEntries();
+}
+
+// ------------------------------------------------------------------ 卡片快捷
+async function quickCycleStatus(e) {
+  const next = STATUS_NEXT[e.status];
+  try { await Api.setStatus(e.id, next); await refreshEntries(); toast(`状态 → ${STATUS_LABEL[next]}`, 'ok'); }
+  catch (err) { toast(err.message, 'err'); }
+}
+async function quickNoteFlow(e) {
+  const cur = (await Api.getEntry(e.id)).fields?.notes?.current || '';
+  const body = el('div');
+  body.innerHTML = `
+    <div class="hint">作为这条的记账备注。修改会留记录。</div>
+    <div class="form-row" style="margin-top:14px">
+      <label>备注</label>
+      <textarea id="qnInput" rows="5" style="width:100%;font-family:inherit;font-size:13px;padding:10px;border-radius:9px;border:1px solid var(--line);resize:vertical">${esc(cur)}</textarea>
+    </div>`;
+  const m = modal({
+    title: '编辑备注', body,
+    footer: [
+      mkBtn('取消', 'ghost', () => m.close()),
+      mkBtn('保存', 'primary', async () => {
+        try { await Api.updateField(e.id, 'notes', body.querySelector('#qnInput').value, State.currentProfileId); m.close(); await refreshEntries(); toast('备注已保存', 'ok'); }
+        catch (err) { toast(err.message, 'err'); }
+      }),
+    ],
+  });
+}
+async function quickDelete(e) {
+  if (!confirm(`确认删除「${e.seller || '该条目'}」？此操作不可撤销。`)) return;
+  try { await Api.deleteEntry(e.id); await refreshEntries(); toast('已删除', 'ok'); }
+  catch (err) { toast(err.message, 'err'); }
 }
 
 // ------------------------------------------------------------------ 事件
 function bindEvents() {
-  $('#profileSelect').onchange = (e) => { State.currentProfileId = e.target.value; };
-  $('#manageProfilesBtn').onclick = () => openProfileManager(false);
+  $('#profilePill').onclick = () => openProfileManager(false);
 
-  document.querySelectorAll('.title-tab').forEach((tab) => {
+  $$('.title-tab').forEach((tab) => {
     tab.onclick = () => {
-      document.querySelectorAll('.title-tab').forEach((t) => t.classList.remove('active'));
+      $$('.title-tab').forEach((t) => t.classList.remove('active'));
       tab.classList.add('active');
       State.activeTitle = tab.dataset.title;
       State.selected.clear();
+      refreshEntries();
+    };
+  });
+
+  $$('[data-rail]').forEach((btn) => {
+    btn.onclick = () => {
+      $$('[data-rail]').forEach((b) => b.classList.remove('active'));
+      btn.classList.add('active');
+      const prev = State.rail;
+      State.rail = btn.dataset.rail;
+      if (prev !== State.rail) {
+        if (State.rail === 'draft') $('#filterStatus').value = '';
+        if (State.rail === 'warn') $('#filterCheck').value = '';
+      }
       refreshEntries();
     };
   });
@@ -182,26 +388,75 @@ function bindEvents() {
   const relist = () => refreshEntries();
   $('#filterStatus').onchange = relist;
   $('#filterCheck').onchange = relist;
-  $('#filterAmountMin').onchange = relist;
-  $('#filterAmountMax').onchange = relist;
-  $('#filterKeyword').oninput = () => { clearTimeout(kwTimer); kwTimer = setTimeout(relist, 250); };
+  $('#filterProfile').onchange = relist;
+  $('#sortSelect').onchange = relist;
+  $('#filterKeyword').oninput = () => { showSearchHintIfEmpty(); clearTimeout(kwTimer); kwTimer = setTimeout(relist, 220); };
+  $('#filterAmountMin').oninput = () => { clearTimeout(kwTimer); kwTimer = setTimeout(relist, 220); };
+  $('#filterAmountMax').oninput = () => { clearTimeout(kwTimer); kwTimer = setTimeout(relist, 220); };
+  $('#filterDateFrom').onchange = relist;
+  $('#filterDateTo').onchange = relist;
+
+  $('#advancedToggle').onclick = () => {
+    const p = $('#advancedPanel');
+    p.classList.toggle('hidden');
+    $('#advancedToggle').classList.toggle('active', !p.classList.contains('hidden'));
+  };
+  $('#clearFilters').onclick = () => clearAllFilters();
+
+  $$('.density-btn').forEach((b) => {
+    b.onclick = () => {
+      $$('.density-btn').forEach((x) => x.classList.remove('active'));
+      b.classList.add('active');
+      State.density = b.dataset.density;
+      $('#entryList').dataset.density = State.density;
+    };
+  });
 
   $('#newEntryBtn').onclick = openNewEntry;
-  $('#summaryBtn').onclick = exportSummary;
-  $('#exportBtn').onclick = () => doExport(State.selected.size ? [...State.selected] : State.entries.map((e) => e.id));
-  $('#importBtn').onclick = doImport;
-  $('#printBtn').onclick = () => openPrintDialog(State.selected.size ? [...State.selected] : State.entries.map((e) => e.id));
+  $('#emptyNew').onclick = () => openNewEntry();
+  $('#railExport').onclick = () => doExport(State.selected.size ? [...State.selected] : State.entries.map((e) => e.id));
+  $('#railImport').onclick = doImport;
+  $('#railPrint').onclick = () => openPrintDialog(State.selected.size ? [...State.selected] : State.entries.map((e) => e.id));
 
-  $('#batchExportBtn').onclick = () => doExport([...State.selected]);
-  $('#batchDeleteBtn').onclick = batchDelete;
+  $('#selectAllBtn').onclick = selectAllVisible;
   $('#clearSelBtn').onclick = () => { State.selected.clear(); renderEntries(); };
+  $('#batchSummaryBtn').onclick = exportSummary;
+  $('#batchDeleteBtn').onclick = batchDelete;
+
+  document.addEventListener('keydown', (e) => {
+    if (e.target.matches('input, textarea, select')) {
+      if (e.key === 'Escape') e.target.blur();
+      return;
+    }
+    if (e.key === '/') { e.preventDefault(); $('#filterKeyword').focus(); }
+    else if (e.key.toLowerCase() === 'n') openNewEntry();
+    else if (e.key === 'Escape') { const m = $('#modalRoot'); if (m.lastChild) m.lastChild.remove(); }
+    else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'a') { e.preventDefault(); selectAllVisible(); }
+  });
+}
+
+function clearAllFilters() {
+  ['filterStatus', 'filterCheck', 'filterProfile', 'filterKeyword', 'filterAmountMin', 'filterAmountMax', 'filterDateFrom', 'filterDateTo'].forEach((id) => { const n = $('#' + id); if (n) n.value = ''; });
+  $$('.title-tab').forEach((t) => t.classList.remove('active'));
+  $$('.title-tab')[0].classList.add('active');
+  $$('[data-rail]').forEach((b) => b.classList.remove('active'));
+  $$('[data-rail]')[0].classList.add('active');
+  State.rail = 'all';
+  State.activeTitle = '';
+  showSearchHintIfEmpty();
+  refreshEntries();
 }
 
 // ------------------------------------------------------------------ 通用弹层
-function modal({ title, body, footer, wide }) {
+function modal({ title, subhead, titleChip, body, footer, wide }) {
   const mask = el('div', 'modal-mask');
   const box = el('div', 'modal' + (wide ? ' wide' : ''));
-  const head = el('div', 'modal-head', `<h2>${esc(title)}</h2>`);
+  const head = el('div', 'modal-head');
+  const titleRow = el('div', 'modal-title-row');
+  if (titleChip) titleRow.appendChild(el('span', 'title-chip lg ' + titleChip.cls, esc(titleChip.text)));
+  titleRow.appendChild(el('h2', null, esc(title)));
+  if (subhead) titleRow.appendChild(el('div', 'modal-subhead', esc(subhead)));
+  head.appendChild(titleRow);
   const closeBtn = el('button', 'modal-close', '×');
   head.appendChild(closeBtn);
   const bodyEl = el('div', 'modal-body');
@@ -216,7 +471,7 @@ function modal({ title, body, footer, wide }) {
   const close = () => mask.remove();
   closeBtn.onclick = close;
   mask.onclick = (e) => { if (e.target === mask) close(); };
-  return { mask, body: bodyEl, close };
+  return { mask, body: bodyEl, close, foot };
 }
 
 function mkBtn(text, cls, onClick) {
@@ -232,30 +487,35 @@ function openProfileManager(forceCreate) {
   function renderList() {
     const list = el('div');
     if (!State.profiles.length) {
-      list.innerHTML = '<p class="hint">还没有身份。请先创建一个：填本人姓名与对应审核人。</p>';
+      list.innerHTML = '<div class="hint">还没有身份。在下方面板创建第一个：填本人姓名与对应审核人。</div>';
+      return list;
     }
     State.profiles.forEach((p) => {
       const row = el('div', 'attach-item');
       row.innerHTML = `<div style="flex:1">
-        <b>${esc(p.name)}</b> → ${esc(p.reviewer)} ${p.is_default ? '<span class="badge pass">默认</span>' : ''}
+        <b>${esc(p.name)}</b> → ${esc(p.reviewer)}
+        ${p.is_default ? ' <span class="badge pass">默认</span>' : ''}
+        <div style="font-size:11px;color:var(--ink-faint);margin-top:2px">
+          ${p.student_id ? '学号 ' + esc(p.student_id) + '　' : ''}
+          ${p.bank_name ? esc(p.bank_name) : ''}
+        </div>
       </div>`;
-      const setDef = mkBtn('设为默认', 'small ghost', async () => {
-        await Api.setDefaultProfile(p.id); await loadProfiles(); refresh();
-      });
-      const del = mkBtn('删除', 'small danger', async () => {
-        try { await Api.deleteProfile(p.id); await loadProfiles(); refresh(); toast('已删除', 'ok'); }
+      if (!p.is_default) row.appendChild(mkBtn('设为默认', 'small ghost', async () => {
+        await Api.setDefaultProfile(p.id); await loadProfiles(); refreshProfileList();
+      }));
+      row.appendChild(mkBtn('删除', 'small danger', async () => {
+        try { await Api.deleteProfile(p.id); await loadProfiles(); refreshProfileList(); toast('已删除', 'ok'); }
         catch (e) { toast(e.message, 'err'); }
-      });
-      if (!p.is_default) row.appendChild(setDef);
-      row.appendChild(del);
+      }));
       list.appendChild(row);
     });
     return list;
   }
+  function refreshProfileList() { wrap.replaceChild(renderList(), wrap.firstChild); }
 
   const form = el('div');
   form.innerHTML = `
-    <h3 style="margin:16px 0 10px;font-size:13px;color:var(--ink-soft)">新增身份</h3>
+    <h3 style="margin:18px 0 10px;font-size:11px;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.06em">新增身份</h3>
     <div class="form-grid">
       <div class="form-row"><label>本人姓名 *</label><input id="pfName" placeholder="必填"/></div>
       <div class="form-row"><label>对应审核人 *</label><input id="pfReviewer" placeholder="必填"/></div>
@@ -280,7 +540,7 @@ function openProfileManager(forceCreate) {
         bank_card: form.querySelector('#pfCard').value.trim(),
       });
       await loadProfiles();
-      refresh();
+      refreshProfileList();
       toast('身份已添加', 'ok');
     } catch (e) { toast(e.message, 'err'); }
   });
@@ -290,10 +550,6 @@ function openProfileManager(forceCreate) {
     body: wrap,
     footer: [addBtn, mkBtn('关闭', 'ghost', () => m.close())],
   });
-
-  function refresh() {
-    wrap.replaceChild(renderList(), wrap.firstChild);
-  }
 }
 
 // ------------------------------------------------------------------ 新建条目
@@ -302,33 +558,34 @@ function openNewEntry() {
 
   const picked = { xml: null, pdf: null, payments: [], inspection: null };
   const body = el('div');
+
+  function uploadTile(key, label, hint, ph, ico) {
+    return `<div class="upload-tile" data-tile="${key}">
+      <div class="ut-title">${ico} ${label}</div>
+      <div class="ut-hint">${hint}</div>
+      <button class="btn small" data-pick="${key}">${ph}</button>
+      <div class="ut-name" id="ne-${key}-name" hidden></div>
+    </div>`;
+  }
+  const utIco = (svg) => svg.replace('<svg ', '<svg width="18" height="18" ');
+
   body.innerHTML = `
-    <div class="hint">推荐同时提供发票 PDF + XML，识别更准；付款截图建议浅色背景。可只传一部分，先存草稿。</div>
+    <div class="hint">推荐同时上传发票 PDF 和 XML，识别更准。材料不齐可先存草稿，之后补齐。</div>
     <div class="form-row" style="margin-top:14px">
-      <label>抬头（强隔离，两个抬头全程分开）</label>
+      <label>抬头</label>
       <select id="neTitle">
-        <option value="">（按识别结果自动判断）</option>
+        <option value="">自动识别</option>
         <option value="北京理工大学">北京理工大学</option>
         <option value="北京理工大学教育基金会">北京理工大学教育基金会</option>
       </select>
     </div>
     <div class="upload-grid">
-      ${uploadRow('xml', '发票 XML', '选择 .xml')}
-      ${uploadRow('pdf', '发票 PDF', '选择 .pdf')}
-      ${uploadRow('payment', '付款截图', '可多选')}
-      ${uploadRow('inspection', '发票查验单 PDF', '选择 .pdf')}
+      ${uploadTile('pdf', '发票 PDF', '推荐上传', '选择文件', utIco(iconPdf()))}
+      ${uploadTile('xml', '发票 XML', '让识别更准', '选择文件', utIco(iconXml()))}
+      ${uploadTile('payment', '付款截图', '可多张 · 浅色背景', '选择图片', utIco(iconImage()))}
+      ${uploadTile('inspection', '查验单 PDF', '可选', '选择文件', utIco(iconInspect()))}
     </div>
     <div id="nePreview"></div>`;
-
-  function uploadRow(key, label, ph) {
-    return `<div class="form-row">
-      <label>${label}</label>
-      <div style="display:flex;gap:8px;align-items:center">
-        <button class="btn small" data-pick="${key}">${ph}</button>
-        <span id="ne-${key}-name" style="font-size:12px;color:var(--ink-soft)">未选择</span>
-      </div>
-    </div>`;
-  }
 
   body.querySelectorAll('[data-pick]').forEach((btn) => {
     btn.onclick = async () => {
@@ -338,10 +595,21 @@ function openNewEntry() {
         const res = await Api.pickFiles(multiple);
         const paths = res.paths || [];
         if (!paths.length) return;
-        const nameSpan = body.querySelector(`#ne-${key}-name`);
-        if (key === 'payment') { picked.payments = paths; nameSpan.textContent = `${paths.length} 张`; }
-        else if (key === 'inspection') { picked.inspection = paths[0]; nameSpan.textContent = baseName(paths[0]); }
-        else { picked[key] = paths[0]; nameSpan.textContent = baseName(paths[0]); await preview(); }
+        const nameEl = body.querySelector(`#ne-${key}-name`);
+        const tile = body.querySelector(`[data-tile="${key}"]`);
+        if (key === 'payment') {
+          picked.payments = paths;
+          nameEl.textContent = `${paths.length} 张付款截图`;
+        } else if (key === 'inspection') {
+          picked.inspection = paths[0];
+          nameEl.textContent = baseName(paths[0]);
+        } else {
+          picked[key] = paths[0];
+          nameEl.textContent = baseName(paths[0]);
+        }
+        nameEl.hidden = false;
+        tile.classList.add('has-file');
+        if (key === 'xml' || key === 'pdf') await preview();
       } catch (e) { toast(e.message, 'err'); }
     };
   });
@@ -353,19 +621,18 @@ function openNewEntry() {
       const p = r.parsed, c = r.check;
       const prev = body.querySelector('#nePreview');
       prev.innerHTML = `
-        <div class="detail-section" style="margin-top:16px">
+        <div class="detail-section" style="margin-top:18px">
           <h3>识别结果 <span class="badge ${c.status}">${CHECK_LABEL[c.status]}</span></h3>
           <div class="kv">
-            <span class="k">发票号码</span><span>${esc(p.invoice_no || '—')}</span>
+            <span class="k">发票号码</span><span class="v-mono">${esc(p.invoice_no || '—')}</span>
             <span class="k">发票日期</span><span>${esc(p.invoice_date || '—')}</span>
             <span class="k">销售方</span><span>${esc(p.seller || '—')}</span>
             <span class="k">购买方抬头</span><span>${esc(p.buyer_name || '—')}</span>
-            <span class="k">价税合计</span><span>${fmtMoney(p.total)}</span>
+            <span class="k">价税合计</span><span><b style="font-family:var(--font-serif);font-size:15px">${fmtMoney(p.total)}</b></span>
             <span class="k">明细条数</span><span>${p.items.length}</span>
           </div>
-          ${c.message ? `<p class="hint" style="margin-top:10px;background:var(--warn-soft);color:var(--warn)">${esc(c.message)}</p>` : ''}
+          ${c.message ? `<p class="hint warn" style="margin-top:12px">${esc(c.message)}</p>` : ''}
         </div>`;
-      // 自动带出抬头
       const titleSel = body.querySelector('#neTitle');
       if (!titleSel.value && p.buyer_name) titleSel.value = p.buyer_name;
     } catch (e) { toast('识别失败：' + e.message, 'err'); }
@@ -388,16 +655,15 @@ function openNewEntry() {
 
   const m = modal({
     title: '新建报账条目',
-    wide: true,
-    body,
+    subhead: '上传后自动识别，发票号、金额等无需手输',
+    wide: true, body,
     footer: [
       mkBtn('存为草稿', 'ghost', () => create('draft')),
+      mkBtn('存为部分', '', () => create('partial')),
       mkBtn('保存', 'primary', () => create('complete')),
     ],
   });
 }
-
-function baseName(p) { return String(p).split(/[/\\]/).pop(); }
 
 // ------------------------------------------------------------------ 条目详情
 async function openEntryDetail(entryId) {
@@ -408,91 +674,99 @@ async function openEntryDetail(entryId) {
   const body = el('div');
   const tcls = TITLE_CLASS[e.title] || '';
   const f = e.fields || {};
+  const owner = State.profileById[e.profile_id];
 
   const itemsRows = (e.items || []).map((it) => `<tr>
-    <td>${esc(it.actual_name || it.name)}</td><td>${esc(it.unit)}</td>
-    <td>${esc(it.quantity)}</td><td>${fmtMoney(it.unit_price)}</td><td>${fmtMoney(it.total)}</td>
+    <td>${esc(it.actual_name || it.name)}</td><td>${esc(it.unit || '—')}</td>
+    <td class="num">${esc(it.quantity || '—')}</td><td class="num">${fmtMoney(it.unit_price)}</td><td class="num">${fmtMoney(it.total)}</td>
   </tr>`).join('') || '<tr><td colspan="5" style="color:var(--ink-soft)">无明细</td></tr>';
 
   const attachRows = (e.attachments || []).map((a) => `
     <div class="attach-item">
       <span class="attach-type">${attachTypeLabel(a.type)}</span>
-      <span style="flex:1">${esc(a.original_name)}</span>
+      <span style="flex:1" title="${esc(a.stored_path)}">${esc(a.original_name)}</span>
+      ${a.note ? `<span style="font-size:11px;color:var(--ink-soft)">· ${esc(a.note)}</span>` : ''}
       <button class="btn small danger" data-del-att="${a.id}">删除</button>
     </div>`).join('') || '<span style="color:var(--ink-soft);font-size:13px">暂无附件</span>';
 
   const history = (e.history || []).map((h) => `
-    <div class="hitem">${esc(h.changed_at)} · ${esc(FIELD_LABEL[h.field] || h.field)}：
-      「${esc(h.old_value || '空')}」→「${esc(h.new_value || '空')}」</div>`).join('')
-    || '<span>暂无修改记录</span>';
+    <div class="hitem">
+      <span class="h-time">${esc(h.changed_at)}</span>
+      <span class="h-field">${esc(FIELD_LABEL[h.field] || h.field)}</span>
+      <span class="h-val">「${esc(h.old_value || '空')}」→「${esc(h.new_value || '空')}」</span>
+    </div>`).join('')
+    || '<div class="attach-item" style="color:var(--ink-soft)">暂无修改记录</div>';
 
   body.innerHTML = `
     <div class="detail-section">
-      <h3>识别信息（默认只读）</h3>
+      <h3>发票信息 <span class="badge ${e.check_status}">${CHECK_LABEL[e.check_status]}</span><span class="h3-line"></span></h3>
       <div class="kv">
-        ${lockedKV('发票号码', 'invoice_no', e.invoice_no)}
+        ${lockedKV('发票号码', 'invoice_no', e.invoice_no, true)}
         <span class="k">发票日期</span><span>${esc(e.invoice_date || '—')}</span>
         <span class="k">销售方</span><span>${esc(e.seller || '—')}</span>
         ${lockedKV('购买方抬头', 'buyer_name', e.buyer_name)}
-        ${lockedKV('价税合计', 'total', e.total, true)}
-        <span class="k">税号</span><span>${esc(e.buyer_tax_id || '—')}</span>
+        ${lockedKV('价税合计', 'total', e.total, true, true)}
+        <span class="k">税号</span><span class="v-mono">${esc(e.buyer_tax_id || '—')}</span>
+        <span class="k">报账人</span><span>${esc(owner ? owner.name : '—')} → ${esc(owner ? owner.reviewer : '—')}</span>
       </div>
+      ${e.check_message ? `<p class="hint warn" style="margin-top:12px">${esc(e.check_message)}</p>` : ''}
     </div>
 
     <div class="detail-section">
-      <h3>可修改信息</h3>
+      <h3>填写信息<span class="h3-line"></span></h3>
       <div class="form-grid">
         ${editRow('实付金额', 'paid_amount', f.paid_amount)}
         ${editRow('实际物资名称', 'actual_item_name', f.actual_item_name)}
+        <div class="form-row">
+          <label>状态</label>
+          <select id="deStatus">
+            <option value="draft"${e.status === 'draft' ? ' selected' : ''}>草稿</option>
+            <option value="partial"${e.status === 'partial' ? ' selected' : ''}>部分材料</option>
+            <option value="complete"${e.status === 'complete' ? ' selected' : ''}>完整</option>
+          </select>
+        </div>
       </div>
       ${editRow('备注', 'notes', f.notes, true)}
     </div>
 
     <div class="detail-section">
-      <h3>状态</h3>
-      <select id="deStatus">
-        <option value="draft"${e.status==='draft'?' selected':''}>草稿</option>
-        <option value="partial"${e.status==='partial'?' selected':''}>部分材料</option>
-        <option value="complete"${e.status==='complete'?' selected':''}>完整</option>
-      </select>
-      <span class="badge ${e.check_status}" style="margin-left:10px">${CHECK_LABEL[e.check_status]}</span>
-      ${e.check_message ? `<p class="hint" style="margin-top:8px;background:var(--warn-soft);color:var(--warn)">${esc(e.check_message)}</p>` : ''}
-    </div>
-
-    <div class="detail-section">
-      <h3>物品明细</h3>
+      <h3>物品明细<span class="h3-line"></span></h3>
       <table class="items-table">
-        <thead><tr><th>名称</th><th>单位</th><th>数量</th><th>单价</th><th>金额</th></tr></thead>
+        <thead><tr><th>名称</th><th>单位</th><th style="text-align:right">数量</th><th style="text-align:right">单价</th><th style="text-align:right">金额</th></tr></thead>
         <tbody>${itemsRows}</tbody>
       </table>
     </div>
 
     <div class="detail-section">
-      <h3>附件 <button class="btn small" id="deAddAtt">＋ 添加</button></h3>
+      <h3>附件 <button class="btn small" id="deAddAtt" style="margin-left:auto">＋ 添加</button><span class="h3-line"></span></h3>
       <div class="attach-list" id="deAttachList">${attachRows}</div>
     </div>
 
     <div class="detail-section">
-      <h3>修改记录（不可擦除）</h3>
+      <h3>修改记录<span class="h3-line"></span></h3>
       <div class="history-list">${history}</div>
     </div>`;
 
-  function lockedKV(label, field, val, money) {
-    const mark = ''; // 关键信息修正记录在 history，这里只标锁
+  function lockedKV(label, field, val, mono, money) {
     return `<span class="k field-locked-label">${label}<span class="lock-icon">🔒</span></span>
-      <span data-locked="${field}" title="关键信息，双击走人工修正留痕">${money ? fmtMoney(val) : esc(val || '—')}${mark}</span>`;
+      <span data-locked="${field}" title="由识别填入。识别有误时双击修改，修改会留记录。" class="${mono ? 'v-mono' : ''}" style="cursor:help">${money ? fmtMoney(val) : esc(val || '—')}</span>`;
   }
 
   function editRow(label, field, fv, full) {
     const modified = fv && fv.modified;
     const val = fv ? fv.current : '';
+    if (field === 'notes') {
+      return `<div class="form-row"${full ? ' style="grid-column:1/-1"' : ''}>
+        <label>${label}${modified ? '<span class="field-modified-mark">' + iconPencil(11) + '已人工修改</span>' : ''}</label>
+        <textarea data-edit="${field}" rows="3" style="width:100%;font-family:inherit;font-size:13px;padding:10px;border-radius:9px;border:1px solid var(--line);resize:vertical">${esc(val)}</textarea>
+      </div>`;
+    }
     return `<div class="form-row"${full ? ' style="grid-column:1/-1"' : ''}>
-      <label>${label}${modified ? '<span class="field-modified-mark">✎ 已人工修改</span>' : ''}</label>
+      <label>${label}${modified ? '<span class="field-modified-mark">' + iconPencil(11) + '已人工修改</span>' : ''}</label>
       <input data-edit="${field}" value="${esc(val)}"/>
     </div>`;
   }
 
-  // 可改字段：失焦保存
   body.querySelectorAll('[data-edit]').forEach((inp) => {
     inp.onchange = async () => {
       try {
@@ -503,36 +777,34 @@ async function openEntryDetail(entryId) {
     };
   });
 
-  // 关键信息：双击走人工修正
   body.querySelectorAll('[data-locked]').forEach((span) => {
-    span.ondblclick = () => correctLockedFlow(entryId, span.dataset.locked, e[span.dataset.locked], m);
+    span.ondblclick = () => correctLockedFlow(entryId, span.dataset.locked, e[span.dataset.locked], mm);
   });
 
-  $('#modalRoot');
   body.querySelector('#deStatus').onchange = async (ev) => {
     try { await Api.setStatus(entryId, ev.target.value); await refreshEntries(); toast('状态已更新', 'ok'); }
     catch (err) { toast(err.message, 'err'); }
   };
 
-  body.querySelector('#deAddAtt').onclick = () => addAttachmentFlow(entryId, m);
+  body.querySelector('#deAddAtt').onclick = () => addAttachmentFlow(entryId, mm);
   body.querySelectorAll('[data-del-att]').forEach((b) => {
     b.onclick = async () => {
-      try { await Api.deleteAttachment(b.dataset.delAtt); toast('已删除', 'ok'); m.close(); openEntryDetail(entryId); await refreshEntries(); }
+      try { await Api.deleteAttachment(b.dataset.delAtt); toast('已删除', 'ok'); mm.close(); openEntryDetail(entryId); await refreshEntries(); }
       catch (err) { toast(err.message, 'err'); }
     };
   });
 
-  const m = modal({
-    title: (tcls ? (e.title === '北京理工大学教育基金会' ? '教育基金会 · ' : '北京理工大学 · ') : '') + '报账条目',
-    wide: true,
-    body,
+  const mm = modal({
+    title: e.seller || (e.invoice_no ? '发票 ' + e.invoice_no : '报账条目'),
+    titleChip: tcls ? { cls: tcls, text: TITLE_SHORT[e.title] || e.title } : null,
+    wide: true, body,
     footer: [
       mkBtn('删除条目', 'danger', async () => {
         if (!confirm('确认删除该条目及其附件？此操作不可撤销。')) return;
-        try { await Api.deleteEntry(entryId); m.close(); await refreshEntries(); toast('已删除', 'ok'); }
+        try { await Api.deleteEntry(entryId); mm.close(); await refreshEntries(); toast('已删除', 'ok'); }
         catch (err) { toast(err.message, 'err'); }
       }),
-      mkBtn('关闭', 'ghost', () => m.close()),
+      mkBtn('关闭', 'ghost', () => mm.close()),
     ],
   });
 }
@@ -545,23 +817,21 @@ function attachTypeLabel(t) {
 async function correctLockedFlow(entryId, field, current, parentModal) {
   const body = el('div');
   body.innerHTML = `
-    <div class="hint" style="background:var(--warn-soft);color:var(--warn)">
-      这是关键信息。修正会永久留痕（记录旧值、新值、时间、身份），随条目一起导出。
-    </div>
+    <div class="hint warn">此项由识别填入。修改会记入记录并随条目导出。</div>
     <div class="form-row" style="margin-top:14px">
       <label>${FIELD_LABEL[field] || field}</label>
       <input id="clVal" value="${esc(current || '')}"/>
     </div>`;
   const m = modal({
-    title: '人工修正关键信息',
+    title: '修改识别信息',
     body,
     footer: [
       mkBtn('取消', 'ghost', () => m.close()),
-      mkBtn('确认修正并留痕', 'primary', async () => {
+      mkBtn('确认修改', 'primary', async () => {
         try {
           await Api.correctLocked(entryId, field, body.querySelector('#clVal').value, State.currentProfileId);
           m.close(); parentModal.close(); openEntryDetail(entryId); await refreshEntries();
-          toast('已修正并留痕', 'ok');
+          toast('已修改并记下', 'ok');
         } catch (err) { toast(err.message, 'err'); }
       }),
     ],
@@ -581,8 +851,7 @@ async function addAttachmentFlow(entryId, parentModal) {
       </select>
     </div>`;
   const m = modal({
-    title: '添加附件',
-    body,
+    title: '添加附件', body,
     footer: [
       mkBtn('取消', 'ghost', () => m.close()),
       mkBtn('选择文件并添加', 'primary', async () => {
@@ -601,18 +870,18 @@ async function addAttachmentFlow(entryId, parentModal) {
 }
 
 // ------------------------------------------------------------------ 汇总 / 绑定包 / 批量
-async function exportSummary() {
-  const ids = State.selected.size ? [...State.selected] : State.entries.map((e) => e.id);
-  if (!ids.length) { toast('没有可导出的条目', 'err'); return; }
+async function exportSummary(ids) {
+  const list = ids || (State.selected.size ? [...State.selected] : State.entries.map((e) => e.id));
+  if (!list.length) { toast('没有可汇总的条目', 'err'); return; }
   try {
-    const s = await Api.buildSummary(ids);
-    const byTitle = Object.entries(s.by_title || {}).map(([t, n]) => `${t}：${n} 条`).join('　');
-    modal({
+    const s = await Api.buildSummary(list);
+    const byTitle = Object.entries(s.by_title || {}).map(([t, n]) => `${TITLE_SHORT[t] || t}：${n} 条`).join('　·　');
+    const m = modal({
       title: '汇总信息',
       wide: true,
-      body: `<div class="hint">共 ${s.count} 条，合计 ${fmtMoney(s.total)}。${byTitle}</div>
-        <pre style="margin-top:12px;background:var(--bg);padding:14px;border-radius:8px;overflow:auto;max-height:52vh;font-size:12px">${esc(JSON.stringify(s, null, 2))}</pre>`,
-      footer: [mkBtn('关闭', 'ghost', function () { this.closest('.modal-mask').remove(); })],
+      body: `<div class="hint">共 <b>${s.count}</b> 条，合计 <b style="font-family:var(--font-serif)">${fmtMoney(s.total)}</b>。${byTitle || ''}</div>
+        <pre style="margin-top:12px;background:var(--paper-2);padding:14px;border-radius:9px;overflow:auto;max-height:48vh;font-size:12px;border:1px solid var(--line-soft)">${esc(JSON.stringify(s, null, 2))}</pre>`,
+      footer: [mkBtn('关闭', 'ghost', () => m.close())],
     });
   } catch (e) { toast(e.message, 'err'); }
 }
@@ -637,7 +906,7 @@ async function doImport() {
     const insp = await Api.inspectBindle(path);
     let allow = false;
     if (!insp.verified) {
-      if (!confirm(`⚠ 该绑定包已被外部修改（${insp.tampered.join(', ')}）。\n仍要导入吗？导入后这些条目将标记为可疑。`)) return;
+      if (!confirm(`这份文件被改过（${insp.tampered.join(', ')}）。\n仍要导入吗？导入后这些条目会标记为可疑。`)) return;
       allow = true;
     }
     const r = await Api.importBindle(path, State.currentProfileId, allow);
@@ -649,30 +918,24 @@ async function doImport() {
 // ------------------------------------------------------------------ 打印导出组件
 async function openPrintDialog(ids) {
   if (!ids || !ids.length) { toast('请先选择要打印的条目', 'err'); return; }
-
   let status;
   try { status = await Api.printComponentStatus(); } catch (e) { toast(e.message, 'err'); return; }
 
   if (!status.available) {
-    modal({
+    const m = modal({
       title: '打印导出组件未安装',
-      body: `<div class="hint" style="background:var(--warn-soft);color:var(--warn)">
-        打印导出是可选组件，当前缺少依赖：<b>${esc((status.missing || []).join(', '))}</b>。<br/>
-        开发阶段可运行 <code>pip install -r requirements-print.txt</code> 安装；
-        正式版将支持从云端按需下载。
-      </div>`,
-      footer: [mkBtn('知道了', 'ghost', function () { this.closest('.modal-mask').remove(); })],
+      body: `<div class="hint warn">打印功能需要安装可选组件，当前缺少：<b>${esc((status.missing || []).join(', '))}</b>。<br/>开发阶段可运行 <code>pip install -r requirements-print.txt</code> 安装。</div>`,
+      footer: [mkBtn('知道了', 'ghost', () => m.close())],
     });
     return;
   }
 
-  // 按抬头统计，提示强隔离
   const byTitle = {};
   State.entries.filter((e) => ids.includes(e.id)).forEach((e) => {
     const t = e.title || '未标注抬头';
     byTitle[t] = (byTitle[t] || 0) + 1;
   });
-  const titleSummary = Object.entries(byTitle).map(([t, n]) => `${t}：${n} 条`).join('　');
+  const titleSummary = Object.entries(byTitle).map(([t, n]) => `${TITLE_SHORT[t] || t}：${n} 条`).join('　·　');
 
   const ANNO = [
     ['invoice_no', '发票号'], ['person_name', '报账人'], ['paid_amount', '实付金额'],
@@ -687,17 +950,15 @@ async function openPrintDialog(ids) {
 
   const body = el('div');
   body.innerHTML = `
-    <div class="hint">
-      共 ${ids.length} 条，按抬头强隔离输出（两个抬头分成独立文件夹，绝不混合）。<br/>${esc(titleSummary)}
-    </div>
+    <div class="hint">共 ${ids.length} 条。两个抬头会分开输出到各自文件夹，不混合。${esc(titleSummary)}</div>
     <div class="detail-section" style="margin-top:16px">
-      <h3>生成内容</h3>
+      <h3>生成内容<span class="h3-line"></span></h3>
       <div class="check-grid">
         ${OUTPUTS.map(([k, label]) => `<label class="chk"><input type="checkbox" data-out="${k}" checked/> ${label}</label>`).join('')}
       </div>
     </div>
     <div class="detail-section">
-      <h3>拼接页叠加信息（勾选要标注的字段）</h3>
+      <h3>拼接页叠加信息（勾选要标注的字段）<span class="h3-line"></span></h3>
       <div class="check-grid">
         ${ANNO.map(([k, label]) => `<label class="chk"><input type="checkbox" data-anno="${k}"${defaultAnno.includes(k) ? ' checked' : ''}/> ${label}</label>`).join('')}
       </div>
@@ -717,8 +978,7 @@ async function openPrintDialog(ids) {
     if (date) options.document_date = date;
     options.storage_location = body.querySelector('#pLoc').value.trim() || '工训楼';
 
-    genBtn.disabled = true;
-    genBtn.textContent = '生成中…';
+    genBtn.disabled = true; genBtn.textContent = '生成中…';
     try {
       const name = '打印件-' + new Date().toISOString().slice(0, 10);
       const r = await Api.buildPrints(ids, options, name);
@@ -726,15 +986,14 @@ async function openPrintDialog(ids) {
       showPrintResult(r.results);
     } catch (e) {
       toast(e.message, 'err');
-      genBtn.disabled = false;
-      genBtn.textContent = '生成打印件';
+      genBtn.disabled = false; genBtn.textContent = '生成打印件';
     }
   });
 
   const m = modal({
     title: '打印导出',
-    wide: true,
-    body,
+    subhead: '两个抬头分开输出 · 可勾选要标注的字段',
+    wide: true, body,
     footer: [mkBtn('取消', 'ghost', () => m.close()), genBtn],
   });
 }
@@ -747,17 +1006,18 @@ function showPrintResult(results) {
   const html = (results || []).map((g) => {
     const tcls = TITLE_CLASS[g.title] || '';
     const files = Object.entries(g.files).map(([k, v]) =>
-      `<div class="attach-item"><span class="attach-type">${OUT_LABEL[k] || k}</span><span style="flex:1">${esc(baseName(v))}</span></div>`).join('');
+      `<div class="attach-item"><span class="attach-type">${OUT_LABEL[k] || k}</span><span style="flex:1" title="${esc(v)}">${esc(baseName(v))}</span></div>`).join('');
     return `<div class="detail-section">
-      <h3>${tcls ? `<span class="title-chip ${tcls}">${esc(g.title === '北京理工大学教育基金会' ? '教育基金会' : g.title)}</span>` : esc(g.title)}</h3>
+      <h3>${tcls ? `<span class="title-chip ${tcls}">${esc(TITLE_SHORT[g.title] || g.title)}</span>` : esc(g.title || '未标注抬头')}<span class="h3-line"></span></h3>
       <div class="attach-list">${files || '<span style="color:var(--ink-soft)">无文件</span>'}</div>
     </div>`;
   }).join('');
-  modal({
+  const m = modal({
     title: '打印件已生成',
+    subhead: '已按抬头分文件夹保存到导出目录',
     wide: true,
-    body: `<div class="hint">已按抬头分文件夹保存到 exports 目录。</div>${html}`,
-    footer: [mkBtn('完成', 'primary', function () { this.closest('.modal-mask').remove(); })],
+    body: html || '<div class="hint">无生成结果。</div>',
+    footer: [mkBtn('完成', 'primary', () => m.close())],
   });
 }
 
@@ -772,6 +1032,15 @@ async function batchDelete() {
     toast('已删除', 'ok');
   } catch (e) { toast(e.message, 'err'); }
 }
+
+window.addEventListener('error', (e) => {
+  const msg = e.error ? e.error.message : e.message;
+  if (msg && !/TSMMenuKey|NSSoftLinking/i.test(msg)) toast('JS 错误：' + msg, 'err');
+});
+window.addEventListener('unhandledrejection', (e) => {
+  const msg = e.reason && (e.reason.message || String(e.reason));
+  if (msg) toast(msg, 'err');
+});
 
 // ------------------------------------------------------------------ 启动
 window.addEventListener('DOMContentLoaded', init);

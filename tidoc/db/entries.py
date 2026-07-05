@@ -141,20 +141,41 @@ class EntryRepo:
         if filters.get("category"):
             where.append("category = ?"); params.append(filters["category"])
         if filters.get("seller"):
-            where.append("seller LIKE ?"); params.append(f"%{filters['seller']}%")
+            where.append("e.seller LIKE ?"); params.append(f"%{filters['seller']}%")
         if filters.get("keyword"):
             kw = f"%{filters['keyword']}%"
-            where.append("(invoice_no LIKE ? OR seller LIKE ? OR buyer_name LIKE ?)")
-            params += [kw, kw, kw]
+            # 关键词检索覆盖：发票号 / 销售方 / 购买方抬头 / 备注 / 实际物资名称 / 明细名称 / 分类
+            where.append("""(
+                e.invoice_no LIKE ? OR e.seller LIKE ? OR e.buyer_name LIKE ?
+                OR e.category LIKE ?
+                OR EXISTS (SELECT 1 FROM entry_fields ef
+                           WHERE ef.entry_id = e.id AND ef.field IN ('notes','actual_item_name')
+                             AND ef.current LIKE ?)
+                OR EXISTS (SELECT 1 FROM items it
+                           WHERE it.entry_id = e.id
+                             AND (it.name LIKE ? OR it.actual_name LIKE ?))
+            )""")
+            params += [kw, kw, kw, kw, kw, kw, kw]
         if filters.get("date_from"):
-            where.append("invoice_date >= ?"); params.append(filters["date_from"])
+            where.append("e.invoice_date >= ?"); params.append(filters["date_from"])
         if filters.get("date_to"):
-            where.append("invoice_date <= ?"); params.append(filters["date_to"])
+            where.append("e.invoice_date <= ?"); params.append(filters["date_to"])
+        if filters.get("modified_only"):
+            where.append("EXISTS (SELECT 1 FROM entry_fields ef WHERE ef.entry_id = e.id AND ef.modified = 1)")
 
-        sql = "SELECT * FROM entries"
+        sql = "SELECT e.* FROM entries e"
         if where:
             sql += " WHERE " + " AND ".join(where)
-        sql += " ORDER BY updated_at DESC"
+        # 排序
+        sort = filters.get("sort") or "updated"
+        order = {
+            "updated": "e.updated_at DESC",
+            "created": "e.created_at DESC",
+            "amount": "e.total DESC",
+            "date": "e.invoice_date DESC",
+            "seller": "e.seller ASC",
+        }.get(sort, "e.updated_at DESC")
+        sql += " ORDER BY " + order
         rows = self.db.conn.execute(sql, params).fetchall()
 
         result = []
@@ -163,9 +184,13 @@ class EntryRepo:
             entry["tags"] = json.loads(entry.get("tags") or "[]")
             # 列表视图带上人工修改标记摘要与附件数，供 UI 显示角标
             entry["modified_fields"] = self._modified_fields(entry["id"])
-            entry["attachment_count"] = self.db.conn.execute(
+            ac = self.db.conn.execute(
                 "SELECT COUNT(*) c FROM attachments WHERE entry_id = ?", (entry["id"],)
             ).fetchone()["c"]
+            entry["attachment_count"] = ac
+            # 列表附上可改字段当前值（备注 / 实付金额 / 实际物资名），供卡片预览
+            ef = self._fields(entry["id"])
+            entry["fields"] = ef
             result.append(entry)
 
         # 金额区间在 Python 侧过滤（total 以字符串存 Decimal）
