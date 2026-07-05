@@ -17,6 +17,7 @@
 python3 -m venv .venv
 source .venv/bin/activate          # Windows: .venv\Scripts\activate
 pip install -r requirements-dev.txt
+pip install -r requirements-print.txt   # 可选：启用打印导出组件
 
 python -m tidoc                    # 启动应用（双击体验的开发等价物）
 python -m tidoc --debug            # 打开 WebView 调试
@@ -26,19 +27,25 @@ pytest                             # 运行测试
 ## 目录结构
 
 ```
-tidoc/
-├─ engine/     解析引擎（XML/PDF 解析、金额闭合校验，移植自 invoice2docx）
-├─ db/         数据层（SQLite + 附件仓库、身份、条目、字段修改追踪）
-├─ services/   汇总、绑定包 .tidoc 导出/导入、HMAC 签名
-├─ web/        HTML/CSS/JS 前端
-├─ api.py      PyWebView JS↔Python 桥
-└─ app.py      应用入口
+tidoc/            核心（必装，只依赖 pywebview + pypdf）
+├─ engine/        解析引擎（XML/PDF 解析、金额闭合校验，移植自 invoice2docx）
+├─ db/            数据层（SQLite + 附件仓库、身份、条目、字段修改追踪）
+├─ services/      汇总、绑定包 .tidoc 导出/导入、HMAC 签名、打印组件适配
+├─ web/           HTML/CSS/JS 前端
+├─ api.py         PyWebView JS↔Python 桥
+└─ app.py         应用入口
+tidoc_print/      打印导出组件（可选安装，重依赖 docx/pypdf/Pillow/reportlab）
+├─ pdf_merge.py   发票/查验单 PDF 拼接、付款截图转 PDF、页面信息标注
+├─ word_docs.py   报账说明 / 验收单 Word 生成（移植自 engine.py）
+├─ builder.py     按抬头强隔离的打印件编排
+└─ templates/     Word 模板
 ```
 
 ## 已完成 / 待做
 
-已跑通（阶段 1–6）：原生窗口骨架、数据层与身份、解析引擎与录入/识别/校验、
-条目增删改查与筛选搜索、字段级修改追踪（不可擦除）、绑定包导出/导入与 HMAC 篡改检测。
+已跑通（阶段 1–8）：原生窗口骨架、数据层与身份、解析引擎与录入/识别/校验、
+条目增删改查与筛选搜索、字段级修改追踪（不可擦除）、绑定包导出/导入与 HMAC 篡改检测、
+打印导出组件（可选安装、按抬头强隔离、跨人合并、页面信息标注）。
 
-待做（阶段 7–9）：COS 联网更新、打印导出组件（可选安装、跨人合并、页面信息标注）、
-打包（Mac/Win）与体积优化。
+待做（阶段 9–10）：OCR 识别组件（可选安装，用户自填阿里云 Key，四档触发）、
+COS 联网更新、打包（Mac/Win）与体积优化。

@@ -175,6 +175,22 @@ class Api:
     def import_bindle(self, path, profile_id, allow_tampered=False):
         return import_bindle(self.entries, self.attachments, path, profile_id, allow_tampered)
 
+    # ------------------------------------------------------------ 打印导出组件（可选）
+    @_guard
+    def print_component_status(self):
+        from .services.printing import component_status
+        return component_status()
+
+    @_guard
+    def build_prints(self, entry_ids, options=None, out_name=None):
+        """生成打印件（发票拼接 / 付款截图拼接 / 查验单拼接 / 报账说明 / 验收单）。
+        按抬头强隔离，输出到 exports/<out_name>/<抬头>/。"""
+        from .services.printing import build_prints as _build
+        name = out_name or "打印件"
+        out_dir = self.data_root.exports_dir / name
+        return _build(self.entries, self.profiles, self.data_root.attachments_dir,
+                      entry_ids, out_dir, options)
+
     # ------------------------------------------------------------ 文件对话框
     @_guard
     def pick_files(self, multiple=True, file_types=None):

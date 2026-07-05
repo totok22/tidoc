@@ -55,6 +55,9 @@ const Api = (() => {
     deleteAttachment: (id) => call('delete_attachment', id),
     setAttachmentNote: (id, note) => call('set_attachment_note', id, note),
 
+    printComponentStatus: () => call('print_component_status'),
+    buildPrints: (ids, options, name) => call('build_prints', ids, options || null, name || null),
+
     buildSummary: (ids) => call('build_summary', ids),
     exportBindle: (ids, name) => call('export_bindle', ids, name),
     inspectBindle: (path) => call('inspect_bindle', path),

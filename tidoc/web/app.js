@@ -190,6 +190,7 @@ function bindEvents() {
   $('#summaryBtn').onclick = exportSummary;
   $('#exportBtn').onclick = () => doExport(State.selected.size ? [...State.selected] : State.entries.map((e) => e.id));
   $('#importBtn').onclick = doImport;
+  $('#printBtn').onclick = () => openPrintDialog(State.selected.size ? [...State.selected] : State.entries.map((e) => e.id));
 
   $('#batchExportBtn').onclick = () => doExport([...State.selected]);
   $('#batchDeleteBtn').onclick = batchDelete;
@@ -643,6 +644,121 @@ async function doImport() {
     await refreshEntries();
     toast(r.message + `（${r.imported} 条）`, r.tampered && r.tampered.length ? 'err' : 'ok');
   } catch (e) { toast(e.message, 'err'); }
+}
+
+// ------------------------------------------------------------------ 打印导出组件
+async function openPrintDialog(ids) {
+  if (!ids || !ids.length) { toast('请先选择要打印的条目', 'err'); return; }
+
+  let status;
+  try { status = await Api.printComponentStatus(); } catch (e) { toast(e.message, 'err'); return; }
+
+  if (!status.available) {
+    modal({
+      title: '打印导出组件未安装',
+      body: `<div class="hint" style="background:var(--warn-soft);color:var(--warn)">
+        打印导出是可选组件，当前缺少依赖：<b>${esc((status.missing || []).join(', '))}</b>。<br/>
+        开发阶段可运行 <code>pip install -r requirements-print.txt</code> 安装；
+        正式版将支持从云端按需下载。
+      </div>`,
+      footer: [mkBtn('知道了', 'ghost', function () { this.closest('.modal-mask').remove(); })],
+    });
+    return;
+  }
+
+  // 按抬头统计，提示强隔离
+  const byTitle = {};
+  State.entries.filter((e) => ids.includes(e.id)).forEach((e) => {
+    const t = e.title || '未标注抬头';
+    byTitle[t] = (byTitle[t] || 0) + 1;
+  });
+  const titleSummary = Object.entries(byTitle).map(([t, n]) => `${t}：${n} 条`).join('　');
+
+  const ANNO = [
+    ['invoice_no', '发票号'], ['person_name', '报账人'], ['paid_amount', '实付金额'],
+    ['invoice_date', '日期'], ['seller', '销售方'], ['total', '价税合计'],
+  ];
+  const OUTPUTS = [
+    ['make_invoice_pdf', '发票拼接 PDF'], ['make_payment_pdf', '付款截图拼接 PDF'],
+    ['make_inspection_pdf', '查验单拼接 PDF'], ['make_reimburse_doc', '报账说明 Word'],
+    ['make_acceptance_doc', '验收单 Word'],
+  ];
+  const defaultAnno = ['invoice_no', 'person_name', 'paid_amount'];
+
+  const body = el('div');
+  body.innerHTML = `
+    <div class="hint">
+      共 ${ids.length} 条，按抬头强隔离输出（两个抬头分成独立文件夹，绝不混合）。<br/>${esc(titleSummary)}
+    </div>
+    <div class="detail-section" style="margin-top:16px">
+      <h3>生成内容</h3>
+      <div class="check-grid">
+        ${OUTPUTS.map(([k, label]) => `<label class="chk"><input type="checkbox" data-out="${k}" checked/> ${label}</label>`).join('')}
+      </div>
+    </div>
+    <div class="detail-section">
+      <h3>拼接页叠加信息（勾选要标注的字段）</h3>
+      <div class="check-grid">
+        ${ANNO.map(([k, label]) => `<label class="chk"><input type="checkbox" data-anno="${k}"${defaultAnno.includes(k) ? ' checked' : ''}/> ${label}</label>`).join('')}
+      </div>
+    </div>
+    <div class="form-grid">
+      <div class="form-row"><label>文档日期</label><input id="pDate" placeholder="如 2026年7月5日"/></div>
+      <div class="form-row"><label>存放地点</label><input id="pLoc" value="工训楼"/></div>
+    </div>`;
+
+  const genBtn = mkBtn('生成打印件', 'primary', async () => {
+    const options = {};
+    body.querySelectorAll('[data-out]').forEach((c) => { options[c.dataset.out] = c.checked; });
+    const annoFields = [...body.querySelectorAll('[data-anno]:checked')].map((c) => c.dataset.anno);
+    options.annotate = annoFields.length > 0;
+    options.annotation_fields = annoFields;
+    const date = body.querySelector('#pDate').value.trim();
+    if (date) options.document_date = date;
+    options.storage_location = body.querySelector('#pLoc').value.trim() || '工训楼';
+
+    genBtn.disabled = true;
+    genBtn.textContent = '生成中…';
+    try {
+      const name = '打印件-' + new Date().toISOString().slice(0, 10);
+      const r = await Api.buildPrints(ids, options, name);
+      m.close();
+      showPrintResult(r.results);
+    } catch (e) {
+      toast(e.message, 'err');
+      genBtn.disabled = false;
+      genBtn.textContent = '生成打印件';
+    }
+  });
+
+  const m = modal({
+    title: '打印导出',
+    wide: true,
+    body,
+    footer: [mkBtn('取消', 'ghost', () => m.close()), genBtn],
+  });
+}
+
+function showPrintResult(results) {
+  const OUT_LABEL = {
+    invoice_pdf: '发票拼接 PDF', payment_pdf: '付款截图拼接 PDF', inspection_pdf: '查验单拼接 PDF',
+    reimburse_doc: '报账说明 Word', acceptance_doc: '验收单 Word',
+  };
+  const html = (results || []).map((g) => {
+    const tcls = TITLE_CLASS[g.title] || '';
+    const files = Object.entries(g.files).map(([k, v]) =>
+      `<div class="attach-item"><span class="attach-type">${OUT_LABEL[k] || k}</span><span style="flex:1">${esc(baseName(v))}</span></div>`).join('');
+    return `<div class="detail-section">
+      <h3>${tcls ? `<span class="title-chip ${tcls}">${esc(g.title === '北京理工大学教育基金会' ? '教育基金会' : g.title)}</span>` : esc(g.title)}</h3>
+      <div class="attach-list">${files || '<span style="color:var(--ink-soft)">无文件</span>'}</div>
+    </div>`;
+  }).join('');
+  modal({
+    title: '打印件已生成',
+    wide: true,
+    body: `<div class="hint">已按抬头分文件夹保存到 exports 目录。</div>${html}`,
+    footer: [mkBtn('完成', 'primary', function () { this.closest('.modal-mask').remove(); })],
+  });
 }
 
 async function batchDelete() {
