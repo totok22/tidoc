@@ -308,11 +308,24 @@ body {
 .entry-line2 .mono { font-family: var(--font-mono); font-size: 11.5px; }
 .entry-line2 .notes-preview { color: var(--ink-faint); font-style: italic; max-width: 38ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: inline-flex; align-items: center; gap: 4px; }
 .entry-line2 .notes-preview svg { color: var(--ink-faint); flex-shrink: 0; }
+/* 附件完整度三点：发票 / 付款 / 查验 */
+.att-dots { display: inline-flex; gap: 4px; }
+.att-dot {
+  font-size: 10px; font-weight: 600; letter-spacing: .02em;
+  padding: 1px 6px; border-radius: 5px; line-height: 1.5;
+  background: transparent; color: var(--ink-faint);
+  border: 1px dashed var(--line); position: relative;
+}
+.att-dot.on {
+  background: var(--pass-soft); color: var(--pass);
+  border: 1px solid transparent;
+}
 .entry-right { text-align: right; display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
 .entry-total { font-family: var(--font-display); font-size: 19px; font-weight: 500; font-variant-numeric: tabular-nums; color: var(--ink); letter-spacing: -.01em; font-variation-settings: "SOFT" 30, "opsz" 40; }
 .entry-total.small { font-size: 16px; color: var(--ink-soft); }
 .entry-paid { font-size: 11px; color: var(--ink-soft); font-variant-numeric: tabular-nums; }
 .entry-paid b { color: var(--pass); }
+.entry-paid.muted { color: var(--ink-faint); font-style: italic; }
 .entry-quick { display: flex; gap: 4px; margin-top: 4px; opacity: 0; transition: .15s; }
 .entry-card:hover .entry-quick { opacity: 1; }
 .entry-quick button {
@@ -335,6 +348,8 @@ body {
 .badge.status-draft { background: #eceae3; color: #6b7280; }
 .badge.status-partial { background: var(--warn-soft); color: var(--warn); }
 .badge.status-complete { background: var(--pass-soft); color: var(--pass); }
+.badge.complete-ready { background: var(--pass-soft); color: var(--pass); }
+.badge.complete-ready::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; margin-right: 1px; }
 .badge.modified { background: var(--modified-soft); color: var(--modified); border: 1px solid #e7c392; }
 .badge.dot::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
 
@@ -399,6 +414,7 @@ input[type="date"] { color: var(--ink-soft); }
   padding: 10px 12px; border-radius: 9px; line-height: 1.6; border: 1px solid var(--line-soft);
 }
 .hint.warn { background: var(--warn-soft); color: var(--warn); border-color: #f0dcb0; }
+.hint.ok-hint { background: var(--pass-soft); color: var(--pass); border-color: transparent; }
 .upload-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 14px; }
 .upload-tile {
   display: flex; flex-direction: column; gap: 8px;
@@ -434,9 +450,52 @@ code { background: var(--paper-2); padding: 2px 6px; border-radius: 4px; font-si
 .items-table th, .items-table td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line-soft); }
 .items-table th { color: var(--ink-soft); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
 .items-table td.num { font-variant-numeric: tabular-nums; text-align: right; }
+.items-table td.act { width: 32px; text-align: center; padding: 4px 2px; }
+.items-table .del-row { background: none; border: none; cursor: pointer; color: var(--ink-faint); padding: 4px; border-radius: 5px; transition: color .12s, background .12s; line-height: 1; }
+.items-table .del-row:hover { color: var(--danger); background: rgba(220,53,69,.08); }
+/* inline editable cells */
+.items-table td .cell-val { display: block; padding: 3px 6px; border-radius: 5px; cursor: text; min-height: 20px; transition: background .12s; }
+.items-table td .cell-val:hover { background: var(--paper-2); }
+.items-table td .cell-input { display: none; width: 100%; border: 1px solid var(--accent); border-radius: 5px; padding: 3px 6px; font: inherit; font-size: 12.5px; background: #fff; outline: none; box-shadow: 0 0 0 2px rgba(91,141,239,.12); }
+.items-table td .cell-input.num { text-align: right; font-variant-numeric: tabular-nums; }
+.items-table td.editing .cell-val { display: none; }
+.items-table td.editing .cell-input { display: block; }
+/* add row button */
+.items-add-row { display: flex; align-items: center; gap: 6px; margin-top: 8px; }
+.items-add-row .btn { font-size: 12px; padding: 5px 12px; }
+/* locked field inline editing */
+.kv .locked-val { padding: 2px 6px; border-radius: 5px; cursor: text; transition: background .12s; }
+.kv .locked-val:hover { background: var(--paper-2); }
+.kv .locked-input { display: none; border: 1px solid var(--accent); border-radius: 5px; padding: 2px 6px; font: inherit; font-size: 13px; background: #fff; outline: none; box-shadow: 0 0 0 2px rgba(91,141,239,.12); width: 100%; }
+.kv .locked-editing .locked-val { display: none; }
+.kv .locked-editing .locked-input { display: block; }
 .attach-list { display: flex; flex-direction: column; gap: 8px; }
 .attach-item { display: flex; align-items: center; gap: 10px; padding: 9px 12px; background: var(--paper-2); border-radius: 8px; font-size: 13px; border: 1px solid var(--line-soft); }
 .attach-type { font-size: 10.5px; padding: 2px 8px; border-radius: 5px; background: #e5e9f0; color: var(--ink-soft); font-weight: 600; }
+/* 报账材料三类分组 */
+.att-groups { display: flex; flex-direction: column; gap: 10px; }
+.att-group { border: 1px solid var(--line-soft); border-radius: 10px; padding: 10px 12px; }
+.att-group.missing { border-style: dashed; background: var(--paper-2); }
+.att-group-head { display: flex; align-items: center; gap: 8px; }
+.att-group-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.att-group.has .att-group-dot { background: var(--pass); }
+.att-group.missing .att-group-dot { background: var(--ink-faint); }
+.att-group-title { font-weight: 600; font-size: 13px; color: var(--ink); }
+.att-group-status { font-size: 11px; color: var(--ink-soft); }
+.att-group.has .att-group-status { color: var(--pass); }
+.att-group-add { margin-left: auto; }
+.att-group-hint { font-size: 12px; color: var(--ink-faint); margin-top: 6px; padding-left: 16px; }
+.att-group .attach-list { margin-top: 8px; }
+/* 批量导入预览 */
+.bi-groups { display: flex; flex-direction: column; gap: 10px; }
+.bi-group { border: 1px solid var(--line-soft); border-radius: 10px; padding: 10px 12px; }
+.bi-group-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 6px; }
+.bi-group-head b { font-size: 13px; }
+.bi-count { font-size: 11px; color: var(--ink-soft); }
+.bi-file { display: flex; align-items: center; gap: 10px; padding: 5px 0; }
+.bi-name { flex: 1; font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bi-type { font-size: 12px; padding: 3px 8px; border-radius: 6px; border: 1px solid var(--line); background: #fff; }
+.bi-ignore { font-size: 12px; color: var(--ink-soft); display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
 .history-list { font-size: 12px; color: var(--ink-soft); display: flex; flex-direction: column; gap: 0; border-radius: 9px; border: 1px solid var(--line-soft); overflow: hidden; }
 .history-list .hitem { padding: 8px 12px; border-bottom: 1px solid var(--line-soft); display: flex; gap: 10px; align-items: baseline; }
 .history-list .hitem:last-child { border-bottom: none; }

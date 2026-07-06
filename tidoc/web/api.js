@@ -51,6 +51,10 @@ const Api = (() => {
     deleteEntry: (id) => call('delete_entry', id),
     deleteEntries: (ids) => call('delete_entries', ids),
 
+    addItem: (entryId, fields) => call('add_item', entryId, fields || {}),
+    updateItem: (itemId, fields) => call('update_item', itemId, fields || {}),
+    deleteItem: (itemId) => call('delete_item', itemId),
+
     addAttachment: (id, path, type, note) => call('add_attachment', id, path, type, note || ''),
     deleteAttachment: (id) => call('delete_attachment', id),
     setAttachmentNote: (id, note) => call('set_attachment_note', id, note),
@@ -64,6 +68,9 @@ const Api = (() => {
     importBindle: (path, pid, allowTampered) => call('import_bindle', path, pid, !!allowTampered),
 
     pickFiles: (multiple, fileTypes) => call('pick_files', multiple !== false, fileTypes || null),
+    pickFolder: () => call('pick_folder'),
+    scanFolder: (folder) => call('scan_folder', folder),
+    batchCreateEntries: (profileId, groups, title) => call('batch_create_entries', profileId, groups, title || ''),
     dataRoot: () => call('data_root_path'),
   };
 })();

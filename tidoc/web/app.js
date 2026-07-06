@@ -31,7 +31,6 @@ function toast(msg, kind) {
 const TITLE_CLASS = { '北京理工大学': 'univ', '北京理工大学教育基金会': 'found' };
 const TITLE_SHORT = { '北京理工大学': '北京理工大学', '北京理工大学教育基金会': '教育基金会' };
 const STATUS_LABEL = { draft: '草稿', partial: '部分材料', complete: '完整' };
-const STATUS_NEXT = { draft: 'partial', partial: 'complete', complete: 'draft' };
 const CHECK_LABEL = { pass: '校验通过', warning: '需确认', blocked: '问题严重' };
 const FIELD_LABEL = {
   paid_amount: '实付金额', actual_item_name: '实际物资名称', notes: '备注',
@@ -64,6 +63,7 @@ const I = {
   image: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="5" width="16" height="14" rx="2"/><circle cx="9" cy="10" r="1.4"/><path d="m4 17 5-4 4 3 3-2 4 4"/></svg>',
   inspect: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="6"/><path d="m20 20-3.5-3.5M8 11h6"/></svg>',
   search: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3-3"/></svg>',
+  lock: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>',
 };
 function iconPencil(s) { return wrapSvg(I.pencil, s); }
 function iconNote(s) { return wrapSvg(I.note, s); }
@@ -207,13 +207,25 @@ function entryCard(e) {
   const chip = e.title ? `<span class="title-chip ${tcls}">${esc(TITLE_SHORT[e.title] || e.title)}</span>` : '';
   const modified = (e.modified_fields && e.modified_fields.length)
     ? `<span class="badge modified" title="有 ${e.modified_fields.length} 个字段被人工修改">${iconPencil(11)}已改 ${e.modified_fields.length}</span>` : '';
-  const checkBadge = e.check_status ? `<span class="badge ${e.check_status}">${CHECK_LABEL[e.check_status] || ''}</span>` : '';
-  const statusBadge = `<span class="badge status-${e.status}">${STATUS_LABEL[e.status] || e.status}</span>`;
+  // 校验状态：仅在 warning/blocked 时突出显示（pass 不占视觉）
+  const checkBadge = (e.check_status && e.check_status !== 'pass')
+    ? `<span class="badge ${e.check_status}" title="${esc(e.check_message || '')}">${CHECK_LABEL[e.check_status] || ''}</span>` : '';
 
   const fields = e.fields || {};
   const notesCur = fields.notes ? fields.notes.current : '';
   const actualCur = fields.actual_item_name ? fields.actual_item_name.current : '';
   const paidCur = fields.paid_amount ? fields.paid_amount.current : '';
+
+  // 三个附件完整度状态点：发票 / 付款 / 查验
+  const dot = (on, label) => `<span class="att-dot${on ? ' on' : ''}" title="${label}${on ? '：已上传' : '：缺'}">${label}</span>`;
+  const attDots = `<span class="att-dots">${dot(e.has_invoice, '发票')}${dot(e.has_payment, '付款')}${dot(e.has_inspection, '查验')}</span>`;
+
+  // 完整度：基于后端派生的 completeness（状态自动推导），缺项做 tooltip
+  const comp = e.completeness || { ready: false, status: e.status, missing: [] };
+  const dstatus = comp.status || e.status;
+  const compBadge = comp.ready
+    ? `<span class="badge complete-ready" title="材料齐全、实付已填、校验通过">齐备</span>`
+    : `<span class="badge status-${dstatus}" title="${comp.missing.length ? '待补：' + comp.missing.join('、') : ''}">${STATUS_LABEL[dstatus] || dstatus}</span>`;
 
   const notesPreview = notesCur
     ? `<span class="notes-preview" title="${esc(notesCur)}">${iconNote(12)}${esc(notesCur)}</span>`
@@ -223,24 +235,23 @@ function entryCard(e) {
     <div class="entry-line1">
       ${chip}
       <span class="entry-seller">${esc(e.seller || '（未识别销售方）')}</span>
-      ${statusBadge}
+      ${compBadge}
       ${checkBadge}
       ${modified}
     </div>
     <div class="entry-line2">
       <span class="mono">${esc(e.invoice_no || '无发票号')}</span>
       <span>${esc(dateShort(e.invoice_date))}</span>
-      <span>附件 ${e.attachment_count || 0}</span>
+      ${attDots}
       ${notesPreview}
     </div>`);
 
   const right = el('div', 'entry-right');
   right.innerHTML = `
     <div class="entry-total">${fmtMoney(e.total)}</div>
-    ${paidCur ? `<div class="entry-paid">实付 <b>${fmtMoney(paidCur)}</b></div>` : ''}
+    ${paidCur ? `<div class="entry-paid">实付 <b>${fmtMoney(paidCur)}</b></div>` : '<div class="entry-paid muted">实付未填</div>'}
     <div class="entry-quick">
       <button data-quick="open" title="查看详情">详情</button>
-      <button data-quick="status" title="切换状态">${STATUS_LABEL[e.status]}</button>
       <button data-quick="note" title="追加备注">备注</button>
       <button data-quick="del" class="danger" title="删除">删</button>
     </div>`;
@@ -249,7 +260,6 @@ function entryCard(e) {
       ev.stopPropagation();
       const a = b.dataset.quick;
       if (a === 'open') openEntryDetail(e.id);
-      else if (a === 'status') quickCycleStatus(e);
       else if (a === 'note') quickNoteFlow(e);
       else if (a === 'del') quickDelete(e);
     };
@@ -325,11 +335,6 @@ async function selectAllVisible() {
 }
 
 // ------------------------------------------------------------------ 卡片快捷
-async function quickCycleStatus(e) {
-  const next = STATUS_NEXT[e.status];
-  try { await Api.setStatus(e.id, next); await refreshEntries(); toast(`状态 → ${STATUS_LABEL[next]}`, 'ok'); }
-  catch (err) { toast(err.message, 'err'); }
-}
 async function quickNoteFlow(e) {
   const cur = (await Api.getEntry(e.id)).fields?.notes?.current || '';
   const body = el('div');
@@ -413,6 +418,7 @@ function bindEvents() {
   });
 
   $('#newEntryBtn').onclick = openNewEntry;
+  $('#batchImportBtn').onclick = openBatchImport;
   $('#emptyNew').onclick = () => openNewEntry();
   $('#railExport').onclick = () => doExport(State.selected.size ? [...State.selected] : State.entries.map((e) => e.id));
   $('#railImport').onclick = doImport;
@@ -638,14 +644,14 @@ function openNewEntry() {
     } catch (e) { toast('识别失败：' + e.message, 'err'); }
   }
 
-  const create = async (status) => {
+  const create = async () => {
     try {
       await Api.createEntry({
         profileId: State.currentProfileId,
         title: body.querySelector('#neTitle').value,
         xmlPath: picked.xml, pdfPath: picked.pdf,
         paymentPaths: picked.payments, inspectionPath: picked.inspection,
-        status,
+        status: 'draft',
       });
       m.close();
       await refreshEntries();
@@ -655,12 +661,102 @@ function openNewEntry() {
 
   const m = modal({
     title: '新建报账条目',
-    subhead: '上传后自动识别，发票号、金额等无需手输',
+    subhead: '上传后自动识别，发票号、金额等无需手输；状态按材料齐全度自动判定',
     wide: true, body,
     footer: [
-      mkBtn('存为草稿', 'ghost', () => create('draft')),
-      mkBtn('存为部分', '', () => create('partial')),
-      mkBtn('保存', 'primary', () => create('complete')),
+      mkBtn('取消', 'ghost', () => m.close()),
+      mkBtn('保存', 'primary', () => create()),
+    ],
+  });
+}
+
+// ------------------------------------------------------------------ 文件夹批量导入
+async function openBatchImport() {
+  if (!State.currentProfileId) { toast('请先选择报账人', 'err'); return; }
+  let picked;
+  try { picked = await Api.pickFolder(); } catch (e) { toast(e.message, 'err'); return; }
+  const folder = picked && picked.path;
+  if (!folder) return;
+
+  let scan;
+  try { scan = await Api.scanFolder(folder); } catch (e) { toast('扫描失败：' + e.message, 'err'); return; }
+
+  // 可编辑的分组模型：ungrouped 里的文件可指派到某组或忽略
+  const TYPE_OPTS = [
+    ['invoice_pdf', '发票 PDF'], ['invoice_xml', '发票 XML'],
+    ['payment_screenshot', '付款截图'], ['inspection_pdf', '查验单'], ['other', '其他'],
+  ];
+  const groups = scan.groups.map((g) => ({ label: g.label, files: g.files.map((f) => ({ ...f })) }));
+  const ungrouped = scan.ungrouped.map((f) => ({ ...f, ignore: true }));
+
+  const body = el('div');
+  const render = () => {
+    const typeSel = (f, idx, gi) => `<select data-type data-gi="${gi}" data-fi="${idx}" class="bi-type">
+      ${TYPE_OPTS.map(([v, l]) => `<option value="${v}"${v === f.type ? ' selected' : ''}>${l}</option>`).join('')}
+    </select>`;
+    const groupRows = groups.map((g, gi) => `
+      <div class="bi-group">
+        <div class="bi-group-head">
+          <b>组 ${esc(g.label)}</b>
+          <span class="bi-count">${g.files.length} 个文件</span>
+        </div>
+        ${g.files.map((f, fi) => `
+          <div class="bi-file">
+            <span class="bi-name" title="${esc(f.name)}">${esc(f.name)}</span>
+            ${typeSel(f, fi, gi)}
+          </div>`).join('')}
+      </div>`).join('') || '<div class="hint">没有可分组的文件。</div>';
+
+    const ungroupedRows = ungrouped.length ? `
+      <div class="detail-section" style="margin-top:16px">
+        <h3>未能自动分组<span class="h3-line"></span></h3>
+        <div class="hint" style="margin-bottom:10px">这些文件名里没有识别到组号，可勾选并入新的一条，或忽略。</div>
+        ${ungrouped.map((f, ui) => `
+          <div class="bi-file">
+            <label class="bi-ignore"><input type="checkbox" data-ung="${ui}" ${f.ignore ? '' : 'checked'}/> 导入</label>
+            <span class="bi-name" title="${esc(f.name)}">${esc(f.name)}</span>
+          </div>`).join('')}
+      </div>` : '';
+
+    body.innerHTML = `
+      <div class="hint">在 <b>${esc(folder)}</b> 找到 <b>${scan.total_files}</b> 个文件，建议分为 <b>${groups.length}</b> 组。每组将创建一条报账条目，可调整每个文件的类型。</div>
+      <div class="bi-groups" style="margin-top:14px">${groupRows}</div>
+      ${ungroupedRows}`;
+
+    body.querySelectorAll('[data-type]').forEach((sel) => {
+      sel.onchange = () => {
+        const gi = +sel.dataset.gi, fi = +sel.dataset.fi;
+        groups[gi].files[fi].type = sel.value;
+      };
+    });
+    body.querySelectorAll('[data-ung]').forEach((cb) => {
+      cb.onchange = () => { ungrouped[+cb.dataset.ung].ignore = !cb.checked; };
+    });
+  };
+  render();
+
+  const m = modal({
+    title: '文件夹批量导入',
+    wide: true, body,
+    footer: [
+      mkBtn('取消', 'ghost', () => m.close()),
+      mkBtn(`创建 ${groups.length} 条`, 'primary', async () => {
+        // 未分组里勾选导入的，合成额外一组
+        const extra = ungrouped.filter((f) => !f.ignore);
+        const payload = groups.map((g) => ({ label: g.label, files: g.files.map((f) => ({ path: f.path, type: f.type })) }));
+        if (extra.length) payload.push({ label: '未分组', files: extra.map((f) => ({ path: f.path, type: f.type })) });
+        if (!payload.length) { toast('没有可创建的分组', 'err'); return; }
+        try {
+          const r = await Api.batchCreateEntries(State.currentProfileId, payload);
+          m.close();
+          await refreshEntries();
+          if (r.failed && r.failed.length) {
+            toast(`创建 ${r.created} 条，${r.failed.length} 组失败`, 'err');
+          } else {
+            toast(`已创建 ${r.created} 条`, 'ok');
+          }
+        } catch (e) { toast(e.message, 'err'); }
+      }),
     ],
   });
 }
@@ -676,18 +772,48 @@ async function openEntryDetail(entryId) {
   const f = e.fields || {};
   const owner = State.profileById[e.profile_id];
 
-  const itemsRows = (e.items || []).map((it) => `<tr>
-    <td>${esc(it.actual_name || it.name)}</td><td>${esc(it.unit || '—')}</td>
-    <td class="num">${esc(it.quantity || '—')}</td><td class="num">${fmtMoney(it.unit_price)}</td><td class="num">${fmtMoney(it.total)}</td>
-  </tr>`).join('') || '<tr><td colspan="5" style="color:var(--ink-soft)">无明细</td></tr>';
+  const itemsRows = (e.items || []).map((it) => {
+    const cols = [
+      { f: 'actual_name', v: it.actual_name || it.name, cls: '' },
+      { f: 'unit', v: it.unit, cls: '' },
+      { f: 'quantity', v: it.quantity, cls: 'num' },
+      { f: 'unit_price', v: it.unit_price, cls: 'num' },
+      { f: 'total', v: it.total, cls: 'num' },
+    ];
+    return `<tr data-item-id="${it.id}">${cols.map((c) =>
+      `<td class="${c.cls}"><span class="cell-val">${c.cls === 'num' ? fmtMoney(c.v) : esc(c.v || '\u2014')}</span><input class="cell-input${c.cls === 'num' ? ' num' : ''}" data-item-field="${c.f}" value="${esc(c.v || '')}"/></td>`
+    ).join('')}<td class="act"><button class="del-row" data-del-item="${it.id}" title="删除此行">\u00d7</button></td></tr>`;
+  }).join('') || `<tr><td colspan="6" style="color:var(--ink-soft)">无明细</td></tr>`;
 
-  const attachRows = (e.attachments || []).map((a) => `
-    <div class="attach-item">
-      <span class="attach-type">${attachTypeLabel(a.type)}</span>
-      <span style="flex:1" title="${esc(a.stored_path)}">${esc(a.original_name)}</span>
-      ${a.note ? `<span style="font-size:11px;color:var(--ink-soft)">· ${esc(a.note)}</span>` : ''}
-      <button class="btn small danger" data-del-att="${a.id}">删除</button>
-    </div>`).join('') || '<span style="color:var(--ink-soft);font-size:13px">暂无附件</span>';
+  // 附件按报账所需的三类分组展示：发票 / 付款截图 / 查验单；缺的类别显式提示
+  const atts = e.attachments || [];
+  const attGroup = (label, types, hint) => {
+    const list = atts.filter((a) => types.includes(a.type));
+    const has = list.length > 0;
+    const rows = list.map((a) => `
+      <div class="attach-item">
+        <span style="flex:1" title="${esc(a.stored_path)}">${esc(a.original_name)}</span>
+        ${a.note ? `<span style="font-size:11px;color:var(--ink-soft)">· ${esc(a.note)}</span>` : ''}
+        <button class="btn small danger" data-del-att="${a.id}">删除</button>
+      </div>`).join('');
+    return `
+      <div class="att-group${has ? ' has' : ' missing'}">
+        <div class="att-group-head">
+          <span class="att-group-dot"></span>
+          <span class="att-group-title">${label}</span>
+          <span class="att-group-status">${has ? `已上传 ${list.length}` : '未上传'}</span>
+          <button class="btn small att-group-add" data-add-att-type="${types[0]}" data-add-att-label="${label}">＋ 添加</button>
+        </div>
+        ${has ? `<div class="attach-list">${rows}</div>` : `<div class="att-group-hint">${hint}</div>`}
+      </div>`;
+  };
+  const attachSection = [
+    attGroup('发票', ['invoice_pdf', 'invoice_xml'], '上传发票 PDF 或 XML，用于识别发票信息。'),
+    attGroup('付款截图', ['payment_screenshot'], '上传付款截图，作为实付凭证。'),
+    attGroup('查验单', ['inspection_pdf'], '上传发票查验单 PDF。'),
+    (atts.some((a) => a.type === 'other')
+      ? attGroup('其他', ['other'], '') : ''),
+  ].join('');
 
   const history = (e.history || []).map((h) => `
     <div class="hitem">
@@ -697,16 +823,21 @@ async function openEntryDetail(entryId) {
     </div>`).join('')
     || '<div class="attach-item" style="color:var(--ink-soft)">暂无修改记录</div>';
 
+  const comp = e.completeness || { ready: false, missing: [] };
+  const compLine = comp.ready
+    ? `<p class="hint ok-hint" style="margin-top:10px">材料齐全、实付已填、校验通过。</p>`
+    : (comp.missing.length ? `<p class="hint" style="margin-top:10px">待补：${comp.missing.map(esc).join('、')}。</p>` : '');
+
   body.innerHTML = `
     <div class="detail-section">
-      <h3>发票信息 <span class="badge ${e.check_status}">${CHECK_LABEL[e.check_status]}</span><span class="h3-line"></span></h3>
+      <h3>发票信息 ${e.check_status && e.check_status !== 'pass' ? `<span class="badge ${e.check_status}">${CHECK_LABEL[e.check_status]}</span>` : ''}<span class="h3-line"></span></h3>
       <div class="kv">
         ${lockedKV('发票号码', 'invoice_no', e.invoice_no, true)}
-        <span class="k">发票日期</span><span>${esc(e.invoice_date || '—')}</span>
-        <span class="k">销售方</span><span>${esc(e.seller || '—')}</span>
+        ${lockedKV('发票日期', 'invoice_date', e.invoice_date)}
+        ${lockedKV('销售方', 'seller', e.seller)}
         ${lockedKV('购买方抬头', 'buyer_name', e.buyer_name)}
         ${lockedKV('价税合计', 'total', e.total, true, true)}
-        <span class="k">税号</span><span class="v-mono">${esc(e.buyer_tax_id || '—')}</span>
+        ${lockedKV('税号', 'buyer_tax_id', e.buyer_tax_id, true)}
         <span class="k">报账人</span><span>${esc(owner ? owner.name : '—')} → ${esc(owner ? owner.reviewer : '—')}</span>
       </div>
       ${e.check_message ? `<p class="hint warn" style="margin-top:12px">${esc(e.check_message)}</p>` : ''}
@@ -717,14 +848,6 @@ async function openEntryDetail(entryId) {
       <div class="form-grid">
         ${editRow('实付金额', 'paid_amount', f.paid_amount)}
         ${editRow('实际物资名称', 'actual_item_name', f.actual_item_name)}
-        <div class="form-row">
-          <label>状态</label>
-          <select id="deStatus">
-            <option value="draft"${e.status === 'draft' ? ' selected' : ''}>草稿</option>
-            <option value="partial"${e.status === 'partial' ? ' selected' : ''}>部分材料</option>
-            <option value="complete"${e.status === 'complete' ? ' selected' : ''}>完整</option>
-          </select>
-        </div>
       </div>
       ${editRow('备注', 'notes', f.notes, true)}
     </div>
@@ -732,14 +855,16 @@ async function openEntryDetail(entryId) {
     <div class="detail-section">
       <h3>物品明细<span class="h3-line"></span></h3>
       <table class="items-table">
-        <thead><tr><th>名称</th><th>单位</th><th style="text-align:right">数量</th><th style="text-align:right">单价</th><th style="text-align:right">金额</th></tr></thead>
+        <thead><tr><th>名称</th><th>单位</th><th style="text-align:right">数量</th><th style="text-align:right">单价</th><th style="text-align:right">金额</th><th style="width:32px"></th></tr></thead>
         <tbody>${itemsRows}</tbody>
       </table>
+      <div class="items-add-row"><button class="btn small" id="deAddItem">＋ 添加明细行</button></div>
     </div>
 
     <div class="detail-section">
-      <h3>附件 <button class="btn small" id="deAddAtt" style="margin-left:auto">＋ 添加</button><span class="h3-line"></span></h3>
-      <div class="attach-list" id="deAttachList">${attachRows}</div>
+      <h3>报账材料<span class="h3-line"></span></h3>
+      <div class="att-groups">${attachSection}</div>
+      ${compLine}
     </div>
 
     <div class="detail-section">
@@ -748,8 +873,12 @@ async function openEntryDetail(entryId) {
     </div>`;
 
   function lockedKV(label, field, val, mono, money) {
-    return `<span class="k field-locked-label">${label}<span class="lock-icon">🔒</span></span>
-      <span data-locked="${field}" title="由识别填入。识别有误时双击修改，修改会留记录。" class="${mono ? 'v-mono' : ''}" style="cursor:help">${money ? fmtMoney(val) : esc(val || '—')}</span>`;
+    const display = money ? fmtMoney(val) : esc(val || '\u2014');
+    return `<span class="k field-locked-label">${label}<span class="lock-icon">${wrapSvg(I.lock, 11)}</span></span>
+      <span data-locked="${field}" class="${mono ? 'v-mono' : ''}">
+        <span class="locked-val" title="点击修改">${display}</span>
+        <input class="locked-input${mono ? ' v-mono' : ''}" value="${esc(val || '')}"/>
+      </span>`;
   }
 
   function editRow(label, field, fv, full) {
@@ -767,6 +896,7 @@ async function openEntryDetail(entryId) {
     </div>`;
   }
 
+  // ---- editable fields (paid_amount, actual_item_name, notes)
   body.querySelectorAll('[data-edit]').forEach((inp) => {
     inp.onchange = async () => {
       try {
@@ -777,16 +907,107 @@ async function openEntryDetail(entryId) {
     };
   });
 
-  body.querySelectorAll('[data-locked]').forEach((span) => {
-    span.ondblclick = () => correctLockedFlow(entryId, span.dataset.locked, e[span.dataset.locked], mm);
+  // ---- locked fields: click-to-edit inline
+  body.querySelectorAll('[data-locked]').forEach((wrap) => {
+    const field = wrap.dataset.locked;
+    const valSpan = wrap.querySelector('.locked-val');
+    const inp = wrap.querySelector('.locked-input');
+    valSpan.onclick = () => {
+      wrap.classList.add('locked-editing');
+      inp.focus();
+      inp.select();
+    };
+    const commit = async () => {
+      wrap.classList.remove('locked-editing');
+      const nv = inp.value.trim();
+      const ov = e[field] || '';
+      if (nv === ov) return;
+      try {
+        await Api.correctLocked(entryId, field, nv, State.currentProfileId);
+        toast('已修改并记下', 'ok');
+        mm.close(); openEntryDetail(entryId); await refreshEntries();
+      } catch (err) { toast(err.message, 'err'); }
+    };
+    inp.onblur = commit;
+    inp.onkeydown = (ev) => {
+      if (ev.key === 'Enter') { ev.preventDefault(); inp.blur(); }
+      if (ev.key === 'Escape') { inp.value = e[field] || ''; wrap.classList.remove('locked-editing'); }
+    };
   });
 
-  body.querySelector('#deStatus').onchange = async (ev) => {
-    try { await Api.setStatus(entryId, ev.target.value); await refreshEntries(); toast('状态已更新', 'ok'); }
-    catch (err) { toast(err.message, 'err'); }
+  // ---- items: click-to-edit inline cells
+  body.querySelectorAll('.items-table td .cell-val').forEach((valSpan) => {
+    valSpan.onclick = () => {
+      const td = valSpan.parentElement;
+      td.classList.add('editing');
+      const inp = td.querySelector('.cell-input');
+      inp.focus();
+      inp.select();
+    };
+  });
+  body.querySelectorAll('.items-table .cell-input').forEach((inp) => {
+    const td = inp.parentElement;
+    const tr = td.closest('tr');
+    const itemId = parseInt(tr.dataset.itemId, 10);
+    const field = inp.dataset.itemField;
+    let origVal = inp.value;
+    const commit = async () => {
+      td.classList.remove('editing');
+      const nv = inp.value.trim();
+      if (nv === origVal) return;
+      try {
+        await Api.updateItem(itemId, { [field]: nv });
+        origVal = nv;
+        td.querySelector('.cell-val').textContent = nv || '\u2014';
+        toast('已保存', 'ok');
+        await refreshEntries();
+      } catch (err) { toast(err.message, 'err'); }
+    };
+    inp.onblur = commit;
+    inp.onkeydown = (ev) => {
+      if (ev.key === 'Enter') { ev.preventDefault(); inp.blur(); }
+      if (ev.key === 'Escape') { inp.value = origVal; td.classList.remove('editing'); }
+      if (ev.key === 'Tab') {
+        ev.preventDefault();
+        inp.blur();
+        // move to next/prev editable cell
+        const allInputs = [...body.querySelectorAll('.items-table .cell-input')];
+        const idx = allInputs.indexOf(inp);
+        const next = allInputs[ev.shiftKey ? idx - 1 : idx + 1];
+        if (next) {
+          const nextTd = next.parentElement;
+          nextTd.classList.add('editing');
+          next.focus();
+          next.select();
+        }
+      }
+    };
+  });
+
+  // ---- items: delete row
+  body.querySelectorAll('[data-del-item]').forEach((btn) => {
+    btn.onclick = async () => {
+      try {
+        await Api.deleteItem(parseInt(btn.dataset.delItem, 10));
+        toast('已删除', 'ok');
+        mm.close(); openEntryDetail(entryId); await refreshEntries();
+      } catch (err) { toast(err.message, 'err'); }
+    };
+  });
+
+  // ---- items: add row
+  body.querySelector('#deAddItem').onclick = async () => {
+    try {
+      await Api.addItem(entryId, { name: '', actual_name: '', unit: '', quantity: '', unit_price: '', total: '' });
+      toast('已添加', 'ok');
+      mm.close(); openEntryDetail(entryId); await refreshEntries();
+    } catch (err) { toast(err.message, 'err'); }
   };
 
-  body.querySelector('#deAddAtt').onclick = () => addAttachmentFlow(entryId, mm);
+  // ---- 报账材料：按类别添加（预选类型）
+  body.querySelectorAll('[data-add-att-type]').forEach((btn) => {
+    btn.onclick = () => addAttachmentFlow(entryId, mm, btn.dataset.addAttType);
+  });
   body.querySelectorAll('[data-del-att]').forEach((b) => {
     b.onclick = async () => {
       try { await Api.deleteAttachment(b.dataset.delAtt); toast('已删除', 'ok'); mm.close(); openEntryDetail(entryId); await refreshEntries(); }
@@ -813,41 +1034,19 @@ function attachTypeLabel(t) {
   return { invoice_pdf: '发票PDF', invoice_xml: '发票XML', payment_screenshot: '付款截图',
     inspection_pdf: '查验单', other: '其他' }[t] || t;
 }
-
-async function correctLockedFlow(entryId, field, current, parentModal) {
+async function addAttachmentFlow(entryId, parentModal, presetType) {
   const body = el('div');
-  body.innerHTML = `
-    <div class="hint warn">此项由识别填入。修改会记入记录并随条目导出。</div>
-    <div class="form-row" style="margin-top:14px">
-      <label>${FIELD_LABEL[field] || field}</label>
-      <input id="clVal" value="${esc(current || '')}"/>
-    </div>`;
-  const m = modal({
-    title: '修改识别信息',
-    body,
-    footer: [
-      mkBtn('取消', 'ghost', () => m.close()),
-      mkBtn('确认修改', 'primary', async () => {
-        try {
-          await Api.correctLocked(entryId, field, body.querySelector('#clVal').value, State.currentProfileId);
-          m.close(); parentModal.close(); openEntryDetail(entryId); await refreshEntries();
-          toast('已修改并记下', 'ok');
-        } catch (err) { toast(err.message, 'err'); }
-      }),
-    ],
-  });
-}
-
-async function addAttachmentFlow(entryId, parentModal) {
-  const body = el('div');
+  const opts = [
+    ['payment_screenshot', '付款截图'],
+    ['invoice_pdf', '发票 PDF'],
+    ['invoice_xml', '发票 XML'],
+    ['inspection_pdf', '查验单 PDF'],
+    ['other', '其他'],
+  ];
   body.innerHTML = `
     <div class="form-row"><label>附件类型</label>
       <select id="atType">
-        <option value="payment_screenshot">付款截图</option>
-        <option value="invoice_pdf">发票 PDF</option>
-        <option value="invoice_xml">发票 XML</option>
-        <option value="inspection_pdf">查验单 PDF</option>
-        <option value="other">其他</option>
+        ${opts.map(([v, l]) => `<option value="${v}"${v === presetType ? ' selected' : ''}>${l}</option>`).join('')}
       </select>
     </div>`;
   const m = modal({

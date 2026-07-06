@@ -86,6 +86,29 @@ def _pdf_text(path: Path) -> str:
 # 一张发票有两个这样的块：第一个是销售方，第二个是购买方（顺序随版面可变）。
 # 这里用「名称:」标签 + 税号正则做到版面无关的稳定抽取。
 _TAX_ID_RE = re.compile(r"[0-9A-Z]{15,20}")
+# 统一社会信用代码固定 18 位；发票号码(EIid) 为 20 位数字，靠长度区分。
+_USCC_RE = re.compile(r"[0-9A-Z]{18,}")
+
+
+def _collect_tax_ids(lines: list[str]) -> list[str]:
+    """按出现顺序收集 18 位统一社会信用代码候选。
+
+    处理两种版面：
+    - 销售方 / 购买方两码连写在同一行（36 位 = 两个 18 位码），按 18 位切分。
+    - 两码分行出现。
+    发票号码(EIid, 20 位数字)、订单号等因长度非 18 的倍数被自动排除。
+    """
+    out: list[str] = []
+    for line in lines:
+        for run in _USCC_RE.findall(line):
+            L = len(run)
+            if L == 18:
+                out.append(run)
+            elif L % 18 == 0 and L // 18 <= 2:  # 至多销售方+购买方两码连写
+                for i in range(0, L, 18):
+                    out.append(run[i:i + 18])
+            # 其它长度（如 20 位发票号）忽略
+    return out
 
 
 def _normalize_party_lines(lines: list[str]) -> list[str]:
@@ -153,12 +176,17 @@ def _extract_parties(lines: list[str]) -> tuple[str, str, str, str]:
                 pending -= 1
                 continue
 
-    # 第二轮：上面收集到的条目可能税号还没补上，按出现顺序在文本后续「统一社会信用代码: 税号」补足
-    tax_lines = [_TAX_ID_RE.search(l).group(0) for l in lines
-                 if ("识别号" in l or "代码" in l) and _TAX_ID_RE.search(l)]
+    # 第二轮：补税号。数电发票里税号可能与「名称/代码」不同行（常与另一方的税号
+    # 连写在同一行，或单独成行），故全局按出现顺序收集 18 位统一社会信用代码，
+    # 再按顺序补给尚缺税号的抬头（名称与税号在同一版面里顺序一致）。
+    tax_ids = _collect_tax_ids(lines)
+    ti = 0
     for i, (nm, tid) in enumerate(parties):
-        if not tid and i < len(tax_lines):
-            parties[i] = (nm, tax_lines[i])
+        if not tid and ti < len(tax_ids):
+            parties[i] = (nm, tax_ids[ti])
+            ti += 1
+        elif tid:
+            ti += 1
 
     seller_name = seller_tax_id = buyer_name = buyer_tax_id = ""
     if len(parties) >= 2:
@@ -233,7 +261,7 @@ def _parse_amount_tax_line(line: str) -> tuple[str, Decimal | None, Decimal, Dec
     m = re.search(
         r"(\*.+?)\s+(\S+)\s+(\S+)\s+(-?\d+(?:\.\d+)?)\s+"
         r"(-?\d+(?:\.\d+)?)\s+(-?\d+\.\d{2})\s+"
-        r"(-?\d+(?:\.\d+)?)%\s+(-?\d+\.\d{2})\s*$",
+        r"(-?\d+(?:\.\d+)?)%\s+(-?\d+(?:\.\d+)?)\s*$",
         line,
     )
     if m:
@@ -247,7 +275,7 @@ def _parse_amount_tax_line(line: str) -> tuple[str, Decimal | None, Decimal, Dec
     # 2) 折行版式：行首带星号分类，尾部只带「金额 税率% 税额」3 段（同名折行修正）
     m = re.search(
         r"(\*.+?)\s+(?:\S+\s+)*?(-?\d+\.\d{2})\s+"
-        r"(-?\d+(?:\.\d+)?)%\s+(-?\d+\.\d{2})\s*$",
+        r"(-?\d+(?:\.\d+)?)%\s+(-?\d+(?:\.\d+)?)\s*$",
         line,
     )
     if m:
@@ -267,7 +295,7 @@ def _parse_pdf_items(lines: list[str]) -> list[ParsedItem]:
     每条明细一行首部带 ``*分类*名称``，遇到统计行（合计 / 价税合计 / 收款人...）终止。
     """
     _SKIP = ("合", "价税合计", "购买时间", "收款人", "复核人", "开票人", "备注",
-             "名称:", "统一社会信用", "电子发票")
+             "名称:", "统一社会信用", "电子发票", "小         计", "小计", "项目名称")
 
     items: list[ParsedItem] = []
     last: ParsedItem | None = None

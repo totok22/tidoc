@@ -17,7 +17,7 @@ from .db import (
     ProfileRepo,
 )
 from .engine import check_invoice, parse_invoice_files
-from .services import export_bindle, import_bindle, inspect_bindle
+from .services import export_bindle, import_bindle, inspect_bindle, scan_folder
 from .services.summary import build_summary
 
 
@@ -101,7 +101,46 @@ class Api:
         if inspection_path:
             self.attachments.add(entry_id, inspection_path, TYPE_INSPECTION)
 
+        self.entries.recompute_status(entry_id)
         return self.entries.get(entry_id)
+
+    # ------------------------------------------------------------ 文件夹批量导入
+    @_guard
+    def scan_folder(self, folder):
+        """扫描目录，按文件名启发式给出建议分组，供前端预览与调整。"""
+        return scan_folder(folder)
+
+    @_guard
+    def batch_create_entries(self, profile_id, groups, title=""):
+        """按前端确认后的分组批量创建条目。
+
+        groups: [{"files": [{"path", "type"}...]}...]
+        每组挑出发票(XML/PDF)做识别，其余作为附件加入。返回创建汇总。
+        """
+        from .db import (TYPE_INSPECTION, TYPE_INVOICE_PDF, TYPE_INVOICE_XML,
+                         TYPE_OTHER, TYPE_PAYMENT)
+        created, failed = [], []
+        for g in (groups or []):
+            files = g.get("files") or []
+            xml_path = next((f["path"] for f in files if f.get("type") == TYPE_INVOICE_XML), None)
+            pdf_path = next((f["path"] for f in files if f.get("type") == TYPE_INVOICE_PDF), None)
+            try:
+                parsed = None
+                if xml_path or pdf_path:
+                    parsed = parse_invoice_files(xml_path, pdf_path)
+                entry_id = self.entries.create(profile_id, title=title, parsed=parsed, status="draft")
+                if parsed:
+                    check = check_invoice(parsed, expected_title=title)
+                    self.entries.set_check(entry_id, check.status, check.message)
+                # 附件按类型加入
+                for f in files:
+                    t = f.get("type") or TYPE_OTHER
+                    self.attachments.add(entry_id, f["path"], t)
+                self.entries.recompute_status(entry_id)
+                created.append(entry_id)
+            except Exception as exc:  # noqa: BLE001 — 单组失败不阻断其余
+                failed.append({"group": g.get("label") or g.get("key") or "?", "error": str(exc)})
+        return {"created": len(created), "entry_ids": created, "failed": failed}
 
     # ------------------------------------------------------------ 条目管理
     @_guard
@@ -114,7 +153,9 @@ class Api:
 
     @_guard
     def update_field(self, entry_id, field, value, profile_id=""):
-        return self.entries.update_field(entry_id, field, value, profile_id)
+        result = self.entries.update_field(entry_id, field, value, profile_id)
+        self.entries.recompute_status(entry_id)
+        return result
 
     @_guard
     def correct_locked_field(self, entry_id, field, value, profile_id=""):
@@ -143,14 +184,33 @@ class Api:
         n = self.entries.delete_many(entry_ids)
         return {"deleted": n}
 
+    # ------------------------------------------------------------ 明细行
+    @_guard
+    def add_item(self, entry_id, fields=None):
+        return self.entries.add_item(entry_id, **(fields or {}))
+
+    @_guard
+    def update_item(self, item_id, fields=None):
+        return self.entries.update_item(item_id, fields or {})
+
+    @_guard
+    def delete_item(self, item_id):
+        entry_id = self.entries.delete_item(item_id)
+        return {"deleted": item_id, "entry_id": entry_id}
+
     # ------------------------------------------------------------ 附件
     @_guard
     def add_attachment(self, entry_id, src_path, att_type, note=""):
-        return self.attachments.add(entry_id, src_path, att_type, note)
+        att = self.attachments.add(entry_id, src_path, att_type, note)
+        self.entries.recompute_status(entry_id)
+        return att
 
     @_guard
     def delete_attachment(self, att_id):
+        att = self.attachments.get(att_id)
         self.attachments.delete(att_id)
+        if att and att.get("entry_id"):
+            self.entries.recompute_status(att["entry_id"])
         return {"deleted": att_id}
 
     @_guard
@@ -205,6 +265,14 @@ class Api:
             dialog_type, allow_multiple=multiple, file_types=types
         )
         return {"paths": list(result) if result else []}
+
+    @_guard
+    def pick_folder(self):
+        """调系统文件夹选择框，返回目录路径。"""
+        import webview
+        result = self._window.create_file_dialog(webview.FOLDER_DIALOG)
+        path = (list(result)[0] if result else "") if result else ""
+        return {"path": path}
 
     @_guard
     def data_root_path(self):

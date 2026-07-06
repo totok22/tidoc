@@ -59,6 +59,67 @@ def test_list_filters(repos, sample_xmls):
     assert len(kw) >= 0  # 关键字过滤不报错
 
 
+def test_item_crud(repos, sample_xmls):
+    p = repos["profiles"].create("张三", "李老师")
+    parsed = parse_xml(sample_xmls[0])
+    eid = repos["entries"].create(p["id"], title=parsed.buyer_name, parsed=parsed)
+    before = len(repos["entries"].get(eid)["items"])
+
+    # 追加一行
+    new_item = repos["entries"].add_item(eid, name="手工加的", actual_name="手工加的",
+                                          unit="个", quantity="2", unit_price="5.00", total="10.00")
+    items = repos["entries"].get(eid)["items"]
+    assert len(items) == before + 1
+    assert items[-1]["actual_name"] == "手工加的"
+    assert items[-1]["ordinal"] == before  # 排在末尾
+
+    # 更新该行
+    updated = repos["entries"].update_item(new_item["id"], {"actual_name": "改名了", "total": "20.00"})
+    assert updated["actual_name"] == "改名了"
+    assert updated["total"] == "20.00"
+
+    # 删除该行
+    ret_eid = repos["entries"].delete_item(new_item["id"])
+    assert ret_eid == eid
+    assert len(repos["entries"].get(eid)["items"]) == before
+
+
+def test_item_update_rejects_unknown_field(repos, sample_xmls):
+    import pytest
+    p = repos["profiles"].create("张三", "李老师")
+    parsed = parse_xml(sample_xmls[0])
+    eid = repos["entries"].create(p["id"], title=parsed.buyer_name, parsed=parsed)
+    item_id = repos["entries"].get(eid)["items"][0]["id"]
+    with pytest.raises(ValueError):
+        repos["entries"].update_item(item_id, {"nonexistent": "x"})
+
+
+def test_completeness_and_status_derivation(repos, sample_xmls):
+    from tidoc.db import TYPE_INSPECTION, TYPE_INVOICE_PDF, TYPE_PAYMENT
+    p = repos["profiles"].create("张三", "李老师")
+    parsed = parse_xml(sample_xmls[0])
+    eid = repos["entries"].create(p["id"], title=parsed.buyer_name, parsed=parsed)
+
+    # 刚建：无附件 → draft，completeness 未齐
+    e = repos["entries"].list(profile_id=p["id"])[0]
+    assert e["completeness"]["ready"] is False
+    assert e["completeness"]["status"] == "draft"
+    assert "发票" in e["completeness"]["missing"]
+
+    # 加三种附件 + 填实付
+    repos["attachments"].add(eid, sample_xmls[0], TYPE_INVOICE_PDF)
+    repos["attachments"].add(eid, sample_xmls[0], TYPE_PAYMENT)
+    repos["attachments"].add(eid, sample_xmls[0], TYPE_INSPECTION)
+    repos["entries"].update_field(eid, "paid_amount", "100.00", p["id"])
+    repos["entries"].set_check(eid, "pass", "")
+    repos["entries"].recompute_status(eid)
+
+    e = [x for x in repos["entries"].list(profile_id=p["id"]) if x["id"] == eid][0]
+    assert e["has_invoice"] and e["has_payment"] and e["has_inspection"]
+    assert e["completeness"]["ready"] is True
+    assert e["completeness"]["status"] == "complete"
+
+
 def test_bindle_round_trip_and_tamper(repos, sample_xmls, tmp_path):
     p = repos["profiles"].create("张三", "李老师")
     ids = []

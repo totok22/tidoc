@@ -20,7 +20,7 @@ from .database import Database
 # 可自由修改的字段（设计文档 8.5）
 EDITABLE_FIELDS = ("paid_amount", "actual_item_name", "notes")
 # 关键信息，软件内默认只读；确需修正走特殊留痕流程（设计文档 8.5、第 6 节）
-LOCKED_FIELDS = ("invoice_no", "total", "buyer_name", "buyer_tax_id", "title")
+LOCKED_FIELDS = ("invoice_no", "total", "buyer_name", "buyer_tax_id", "title", "seller", "invoice_date")
 
 STATUS_DRAFT = "draft"
 STATUS_PARTIAL = "partial"
@@ -96,6 +96,12 @@ class EntryRepo:
         entry["items"] = self._items(entry_id)
         entry["attachments"] = self._attachments(entry_id)
         entry["history"] = self.history(entry_id)
+        # 按类型汇总附件在场情况，供完整度派生（与 list 保持一致）
+        types = {a["type"] for a in entry["attachments"]}
+        entry["has_invoice"] = bool({"invoice_pdf", "invoice_xml"} & types)
+        entry["has_payment"] = "payment_screenshot" in types
+        entry["has_inspection"] = "inspection_pdf" in types
+        entry["completeness"] = self._completeness(entry, entry["fields"])
         return entry
 
     def _fields(self, entry_id: str) -> dict:
@@ -184,13 +190,21 @@ class EntryRepo:
             entry["tags"] = json.loads(entry.get("tags") or "[]")
             # 列表视图带上人工修改标记摘要与附件数，供 UI 显示角标
             entry["modified_fields"] = self._modified_fields(entry["id"])
-            ac = self.db.conn.execute(
-                "SELECT COUNT(*) c FROM attachments WHERE entry_id = ?", (entry["id"],)
-            ).fetchone()["c"]
-            entry["attachment_count"] = ac
+            # 按类型统计附件，供 UI 显示「发票/付款/查验」三个完整度状态点
+            type_rows = self.db.conn.execute(
+                "SELECT type, COUNT(*) c FROM attachments WHERE entry_id = ? GROUP BY type",
+                (entry["id"],),
+            ).fetchall()
+            by_type = {tr["type"]: tr["c"] for tr in type_rows}
+            entry["attachment_count"] = sum(by_type.values())
+            entry["attachment_types"] = by_type
+            entry["has_invoice"] = bool(by_type.get("invoice_pdf") or by_type.get("invoice_xml"))
+            entry["has_payment"] = bool(by_type.get("payment_screenshot"))
+            entry["has_inspection"] = bool(by_type.get("inspection_pdf"))
             # 列表附上可改字段当前值（备注 / 实付金额 / 实际物资名），供卡片预览
             ef = self._fields(entry["id"])
             entry["fields"] = ef
+            entry["completeness"] = self._completeness(entry, ef)
             result.append(entry)
 
         # 金额区间在 Python 侧过滤（total 以字符串存 Decimal）
@@ -216,6 +230,33 @@ class EntryRepo:
             "SELECT field FROM entry_fields WHERE entry_id = ? AND modified = 1", (entry_id,)
         ).fetchall()
         return [r["field"] for r in rows]
+
+    @staticmethod
+    def _completeness(entry: dict, fields: dict) -> dict:
+        """派生「完整度」与状态：发票 + 付款截图 + 查验单三种附件齐、实付已填、校验通过。
+
+        状态自动推导（不再纯手动）：
+        - complete：三种材料齐 + 实付已填 + 校验未 blocked。
+        - draft：什么材料都还没有。
+        - partial：介于两者之间。
+        返回 {ready, status, missing:[中文缺项...]}。
+        """
+        missing = []
+        if not entry.get("has_invoice"):
+            missing.append("发票")
+        if not entry.get("has_payment"):
+            missing.append("付款截图")
+        if not entry.get("has_inspection"):
+            missing.append("查验单")
+        paid = (fields.get("paid_amount") or {}).get("current") or ""
+        if not str(paid).strip():
+            missing.append("实付金额")
+        if entry.get("check_status") == "blocked":
+            missing.append("校验未通过")
+        ready = not missing
+        any_material = entry.get("has_invoice") or entry.get("has_payment") or entry.get("has_inspection")
+        status = "complete" if ready else ("partial" if any_material else "draft")
+        return {"ready": ready, "status": status, "missing": missing}
 
     # ------------------------------------------------------------------ 可改字段更新
     def update_field(self, entry_id: str, field: str, value: str, profile_id: str = "") -> dict:
@@ -282,6 +323,31 @@ class EntryRepo:
         self._touch(entry_id)
         self.db.conn.commit()
 
+    def recompute_status(self, entry_id: str) -> str:
+        """按附件齐全 + 实付已填 + 校验通过自动推导并持久化 status。
+
+        附件或可改字段变化后调用，使列表筛选、导航分区与卡片徽标保持一致。
+        """
+        entry = self.db.conn.execute(
+            "SELECT check_status FROM entries WHERE id = ?", (entry_id,)
+        ).fetchone()
+        if not entry:
+            return ""
+        type_rows = self.db.conn.execute(
+            "SELECT DISTINCT type FROM attachments WHERE entry_id = ?", (entry_id,)
+        ).fetchall()
+        types = {r["type"] for r in type_rows}
+        stub = {
+            "check_status": entry["check_status"],
+            "has_invoice": bool({"invoice_pdf", "invoice_xml"} & types),
+            "has_payment": "payment_screenshot" in types,
+            "has_inspection": "inspection_pdf" in types,
+        }
+        status = self._completeness(stub, self._fields(entry_id))["status"]
+        self.db.conn.execute("UPDATE entries SET status = ? WHERE id = ?", (status, entry_id))
+        self.db.conn.commit()
+        return status
+
     def set_check(self, entry_id: str, check_status: str, message: str = "") -> None:
         self.db.conn.execute(
             "UPDATE entries SET check_status = ?, check_message = ? WHERE id = ?",
@@ -302,6 +368,55 @@ class EntryRepo:
 
     def _touch(self, entry_id: str) -> None:
         self.db.conn.execute("UPDATE entries SET updated_at = ? WHERE id = ?", (_now(), entry_id))
+
+    # ------------------------------------------------------------------ 明细行 CRUD
+    def add_item(self, entry_id: str, name: str = "", actual_name: str = "",
+                 unit: str = "", quantity: str = "", unit_price: str = "",
+                 total: str = "", spec: str = "") -> dict:
+        """在条目末尾追加一条明细行，返回新行 dict。"""
+        max_ord = self.db.conn.execute(
+            "SELECT COALESCE(MAX(ordinal), -1) FROM items WHERE entry_id = ?", (entry_id,)
+        ).fetchone()[0]
+        self.db.conn.execute(
+            """INSERT INTO items(entry_id, name, actual_name, unit, quantity,
+               unit_price, total, spec, ordinal) VALUES(?,?,?,?,?,?,?,?,?)""",
+            (entry_id, name, actual_name, unit, quantity, unit_price, total, spec, max_ord + 1),
+        )
+        self._touch(entry_id)
+        self.db.conn.commit()
+        return self._items(entry_id)[-1]
+
+    def update_item(self, item_id: int, fields: dict) -> dict:
+        """更新一条明细行的指定字段，返回更新后的行 dict。"""
+        allowed = ("name", "actual_name", "unit", "quantity", "unit_price", "total", "spec")
+        sets, vals = [], []
+        for k, v in fields.items():
+            if k in allowed:
+                sets.append(f"{k} = ?")
+                vals.append(str(v) if v is not None else "")
+        if not sets:
+            raise ValueError("没有可更新的字段。")
+        row = self.db.conn.execute("SELECT entry_id FROM items WHERE id = ?", (item_id,)).fetchone()
+        if not row:
+            raise ValueError("明细行不存在。")
+        entry_id = row["entry_id"]
+        vals.append(item_id)
+        self.db.conn.execute(f"UPDATE items SET {', '.join(sets)} WHERE id = ?", vals)
+        self._touch(entry_id)
+        self.db.conn.commit()
+        updated = self.db.conn.execute("SELECT * FROM items WHERE id = ?", (item_id,)).fetchone()
+        return _row_to_dict(updated)
+
+    def delete_item(self, item_id: int) -> str:
+        """删除一条明细行，返回所属 entry_id。"""
+        row = self.db.conn.execute("SELECT entry_id FROM items WHERE id = ?", (item_id,)).fetchone()
+        if not row:
+            raise ValueError("明细行不存在。")
+        entry_id = row["entry_id"]
+        self.db.conn.execute("DELETE FROM items WHERE id = ?", (item_id,))
+        self._touch(entry_id)
+        self.db.conn.commit()
+        return entry_id
 
     # ------------------------------------------------------------------ 删除
     def delete(self, entry_id: str) -> None:
