@@ -1,13 +1,14 @@
 """文件夹批量导入的分组启发式测试。"""
 
-from tidoc.services import scan_folder
+from tidoc.services import scan_files, scan_folder
+from tidoc.engine import parse_pdf
 
 SAMPLE_DIR = "/Users/poli/invoice2docx/invoices"
 
 
 def test_scan_folder_groups_by_prefix():
     r = scan_folder(SAMPLE_DIR)
-    # 批量导入现在只按发票 PDF 建条目；付款截图/查验单会被跳过，后续手动添加。
+    # 批量导入按发票 PDF 建条目；付款截图/查验单不靠命名自动绑定。
     assert r["total_files"] > 0
     assert len(r["groups"]) >= 10
 
@@ -24,7 +25,21 @@ def test_scan_folder_type_classification():
     for g in r["groups"]:
         for f in g["files"]:
             assert f["type"] in {"invoice_pdf", "invoice_xml"}
-    assert any("付款" in f["name"] or f["name"].lower().endswith(".jpg") for f in r["ignored"])
+    assert any(f["type"] == "payment_screenshot" for f in r["ignored"])
+    assert any(f["type"] == "inspection_pdf" for f in r["ignored"])
+    assert r["matched_xml_count"] > 0
+
+
+def test_scan_files_accepts_multi_selected_invoice_files():
+    paths = [
+        f"{SAMPLE_DIR}/28+电子元件+390.05+发票.pdf",
+        f"{SAMPLE_DIR}/20260425205440942/立创商城发票-7556653A-26957000000103383672.xml",
+    ]
+    r = scan_files(paths)
+    assert r["invoice_pdf_count"] == 1
+    assert r["matched_xml_count"] == 1
+    assert len(r["groups"]) == 1
+    assert {f["type"] for f in r["groups"][0]["files"]} == {"invoice_pdf", "invoice_xml"}
 
 
 def test_scan_folder_accepts_messy_invoice_pdfs_without_xml(tmp_path):
@@ -40,18 +55,34 @@ def test_scan_folder_accepts_messy_invoice_pdfs_without_xml(tmp_path):
     assert r["ignored"]
 
 
+def test_known_messy_sample_pdfs_parse_core_fields():
+    samples = [
+        ("26+稳压电源+128.62+发票.pdf", "深圳市驿生胜利科技有限公司", "直流稳压电源"),
+        ("27+pc耗材+200.13+发票.pdf", "深圳拓竹科技有限公司", "3D打印机线材"),
+        ("26332000004713530326-北京理工大学教育基金会.pdf", "杭州深度求索人工智能基础技术研究有限公司", "技术服务"),
+        ("71+排插+107+发票.pdf", "北京京东金禾贸易有限公司", "公牛"),
+    ]
+    for filename, seller, item_keyword in samples:
+        inv = parse_pdf(f"{SAMPLE_DIR}/{filename}")
+        assert inv.invoice_no
+        assert inv.buyer_name == "北京理工大学教育基金会"
+        assert inv.seller == seller
+        assert inv.items
+        assert item_keyword in inv.items[0].actual_name
+
+
 def test_batch_create_entries(api):
     from tidoc.services import scan_folder as sf
     p = api.create_profile("张三", "李老师")["data"]
     scan = sf(SAMPLE_DIR)
     # 取前两组做批量创建
+    picked = scan["groups"][:2]
     groups = [{"label": g["label"],
                "files": [{"path": f["path"], "type": f["type"]} for f in g["files"]]}
-              for g in scan["groups"][:2]]
+              for g in picked]
     res = api.batch_create_entries(p["id"], groups)["data"]
     assert res["created"] == 2
     assert not res["failed"]
-    # 批量只导发票材料；付款截图 / 查验单之后在详情页手动补。
     for eid in res["entry_ids"]:
         e = api.get_entry(eid)["data"]
         assert e["has_invoice"]

@@ -130,6 +130,45 @@ def _normalize_party_lines(lines: list[str]) -> list[str]:
     return out
 
 
+def _normalize_label(line: str) -> str:
+    return re.sub(r"\s+", "", line).replace("：", ":")
+
+
+def _looks_like_invoice_meta(line: str) -> bool:
+    norm = _normalize_label(line)
+    if not norm:
+        return True
+    if re.fullmatch(r"\d{20}", norm):
+        return True
+    if re.fullmatch(r"\d{4}年\d{2}月\d{2}日", norm):
+        return True
+    if _TAX_ID_RE.fullmatch(norm):
+        return True
+    return any(k in norm for k in (
+        "发票", "开票日期", "项目名称", "统一社会信用", "纳税人识别号",
+        "购买方信息", "买方信息", "销售方信息", "名称:", "合计", "备注", "开票人",
+    ))
+
+
+def _split_combined_party_names(line: str) -> list[str]:
+    """拆分同一行里连写的销售方/购买方名称。"""
+    from .validator import SUPPORTED_TITLES
+
+    if line in SUPPORTED_TITLES:
+        return [line]
+    for title in sorted(SUPPORTED_TITLES, key=len, reverse=True):
+        if title and title in line and line != title:
+            before, after = line.split(title, 1)
+            parts: list[str] = []
+            if before.strip():
+                parts.append(before.strip())
+            parts.append(title)
+            if after.strip():
+                parts.append(after.strip())
+            return parts
+    return [line]
+
+
 def _extract_parties(lines: list[str]) -> tuple[str, str, str, str]:
     """从文本行里抽销售方与购买方：名称 + 税号。
 
@@ -146,14 +185,16 @@ def _extract_parties(lines: list[str]) -> tuple[str, str, str, str]:
            统一社会信用代码: 销售方税号
     """
     parties: list[tuple[str, str]] = []  # (name, tax_id)
-    n = len(lines)
     pending = 0          # 仍在等待抬头配对的「名称:」数量
-    name_pending: list[int] = []  # 已收到的「名称:」标签在 parties 中的 slot 索引
-    for idx, line in enumerate(lines):
-        m = re.match(r"名称[:：]\s*(.*)", line)
+    for line in lines:
+        m = re.match(r"名\s*称\s*[:：]\s*(.*)", line)
         if m:
             tail_text = m.group(1).strip()
-            if not tail_text:
+            label_count = len(re.findall(r"名\s*称\s*[:：]", line))
+            if label_count > 1:
+                pending += label_count
+                continue
+            if (not tail_text) or _looks_like_invoice_meta(tail_text) or tail_text in {"购", "销", "买", "售"}:
                 pending += 1
                 continue
             tail_tax = _TAX_ID_RE.search(tail_text)
@@ -164,15 +205,18 @@ def _extract_parties(lines: list[str]) -> tuple[str, str, str, str]:
             continue
         if pending > 0:
             # 抬头名候选：跳过空行、税号行（"统一社会信用..."）、竖排单字残留
-            if ("识别号" in line) or ("代码" in line) or "购" in line or "销" in line:
-                pass
-            elif line:
-                m2 = _TAX_ID_RE.search(line)
+            if _looks_like_invoice_meta(line):
+                continue
+            for name in _split_combined_party_names(line):
+                if pending <= 0:
+                    break
+                if _looks_like_invoice_meta(name):
+                    continue
+                m2 = _TAX_ID_RE.search(name)
                 if m2:
-                    parties_name = (line[:m2.start()].strip(), m2.group(0))
-                    pii = len(parties); parties.append(parties_name)
+                    parties.append((name[:m2.start()].strip(), m2.group(0)))
                 else:
-                    parties.append((line, ""))
+                    parties.append((name, ""))
                 pending -= 1
                 continue
 
@@ -285,6 +329,36 @@ def _parse_amount_tax_line(line: str) -> tuple[str, Decimal | None, Decimal, Dec
     return None
 
 
+def _parse_loose_amount_tax_line(line: str) -> tuple[str, Decimal | None, Decimal, Decimal] | None:
+    """解析被 PDF 文本流拆乱的金额行。
+
+    常见坏形态：
+    - ``13%台 113.82 14.80113.821``（税率、单位、金额、税额粘连）
+    - ``... 个 1 94.69 94.69 12.3113%``（税额和税率反向粘连）
+    """
+    compact = re.sub(r"\s+", " ", line).strip()
+
+    m = re.search(
+        r"(?P<rate>\d+(?:\.\d+)?)%(?P<unit>[\u4e00-\u9fffA-Za-z]{1,4})\s+"
+        r"(?P<amount>-?\d+\.\d{2})\s+(?P<tail>-?\d+\.\d{2})",
+        compact,
+    )
+    if m:
+        return m.group("unit"), None, d(m.group("amount")), d(m.group("tail"))
+
+    m = re.search(r"(?P<tax>-?\d+\.\d{2})(?P<rate>\d+(?:\.\d+)?)%\s*$", compact)
+    if m:
+        before = compact[:m.start()]
+        nums = re.findall(r"-?\d+(?:\.\d+)?", before)
+        amount = d(nums[-1]) if nums else Decimal("0")
+        quantity = d(nums[-3]) if len(nums) >= 3 else None
+        unit_match = re.search(r"([\u4e00-\u9fffA-Za-z]{1,4})\s+-?\d+(?:\.\d+)?\s+-?\d+\.\d{2}\s*$", before)
+        unit = unit_match.group(1) if unit_match else ""
+        return unit, quantity, amount, d(m.group("tax"))
+
+    return None
+
+
 def _normalize_name(parts: list[str]) -> str:
     return re.sub(r"\s+", "", "".join(parts)).strip()
 
@@ -299,6 +373,7 @@ def _parse_pdf_items(lines: list[str]) -> list[ParsedItem]:
 
     items: list[ParsedItem] = []
     last: ParsedItem | None = None
+    pending_name_parts: list[str] = []
 
     def make_item(name: str, unit: str, quantity, amount, tax):
         item = ParsedItem(
@@ -313,11 +388,34 @@ def _parse_pdf_items(lines: list[str]) -> list[ParsedItem]:
     for line in lines:
         if any(k in line for k in _SKIP):
             continue
+        if pending_name_parts:
+            loose = _parse_loose_amount_tax_line(line)
+            if loose:
+                unit, quantity, amount, tax = loose
+                raw_name = _normalize_name(pending_name_parts)
+                item = make_item(raw_name, unit, quantity, amount, tax)
+                items.append(item)
+                last = item
+                pending_name_parts = []
+                continue
+            if not re.search(r"\d+\.\d{2}|\d+%", line):
+                pending_name_parts.append(line)
+                continue
+
         if not line.startswith("*"):
             continue
         parsed = _parse_amount_tax_line(line)
         if not parsed:
-            # 单独一行作为名称的延续 / 名称跨行——直接忽略，等下一行带数字的版式中合并
+            loose = _parse_loose_amount_tax_line(line)
+            if loose:
+                unit, quantity, amount, tax = loose
+                marker = re.search(r"\d+(?:\.\d+)?%[\u4e00-\u9fffA-Za-z]{1,4}\s+-?\d+\.\d{2}", line)
+                raw_name = line[:marker.start()].strip() if marker else line
+                item = make_item(raw_name, unit, quantity, amount, tax)
+                items.append(item)
+                last = item
+                continue
+            pending_name_parts = [line]
             continue
         unit, quantity, amount, tax, name_end = parsed
         # raw_name 从行首到「名称末尾位置」（正则1 给出）截取

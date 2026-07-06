@@ -7,9 +7,13 @@
 from __future__ import annotations
 
 import functools
+import base64
 import os
+import re
 import subprocess
 import sys
+import time
+import uuid
 from pathlib import Path
 
 from .db import (
@@ -20,7 +24,7 @@ from .db import (
     ProfileRepo,
 )
 from .engine import check_invoice, parse_invoice_files
-from .services import export_bindle, import_bindle, inspect_bindle, scan_folder
+from .services import export_bindle, import_bindle, inspect_bindle, scan_files, scan_folder
 from .services.exports import export_attachment_zip, export_overview_xlsx
 from .services.summary import build_summary
 
@@ -47,6 +51,7 @@ class Api:
         self.entries = EntryRepo(self.db)
         self.attachments = AttachmentRepo(self.db, self.data_root)
         self._window = None
+        _cleanup_old_dropped_files(self.data_root.dropped_dir)
 
     def bind_window(self, window) -> None:
         self._window = window
@@ -115,11 +120,49 @@ class Api:
         return scan_folder(folder)
 
     @_guard
+    def scan_files(self, paths):
+        """扫描多选或拖入的发票文件，按发票 PDF 生成批量导入预览。"""
+        return scan_files(paths or [])
+
+    @_guard
+    def save_dropped_files(self, files):
+        """保存前端拖入但拿不到本机路径的文件，返回临时路径列表。"""
+        staging = self.data_root.dropped_dir
+        staging.mkdir(parents=True, exist_ok=True)
+        out = []
+        for item in (files or []):
+            name = _safe_filename(item.get("name") or "dropped-file")
+            data_url = item.get("data_url") or ""
+            if "," in data_url:
+                data_url = data_url.split(",", 1)[1]
+            if not data_url:
+                raise ValueError(f"文件内容为空：{name}")
+            raw = base64.b64decode(data_url)
+            dest_dir = staging / uuid.uuid4().hex[:8]
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            dest = dest_dir / name
+            dest.write_bytes(raw)
+            out.append(str(dest))
+        return {"paths": out}
+
+    @_guard
+    def cleanup_dropped_files(self, paths):
+        """删除拖拽中转区里的临时文件。只允许删除 dropped/ 内的文件。"""
+        deleted = 0
+        for path in (paths or []):
+            p = Path(path)
+            if _is_inside(self.data_root.dropped_dir, p) and p.is_file():
+                p.unlink()
+                _remove_empty_dropped_parent(self.data_root.dropped_dir, p.parent)
+                deleted += 1
+        return {"deleted": deleted}
+
+    @_guard
     def batch_create_entries(self, profile_id, groups, title=""):
         """按前端确认后的分组批量创建条目。
 
         groups: [{"files": [{"path", "type"}...]}...]
-        每组必须有发票 PDF，可附带一份或多份 XML；付款截图 / 查验单不参与批量。
+        每组必须有发票 PDF，可附带 XML。付款截图 / 查验单在条目内添加。
         """
         from .db import TYPE_INVOICE_PDF, TYPE_INVOICE_XML
         created, failed = [], []
@@ -133,6 +176,13 @@ class Api:
                 if not pdf_path:
                     raise ValueError("缺少发票 PDF")
                 parsed = parse_invoice_files(xml_path, pdf_path)
+                if parsed.invoice_no:
+                    old = self.db.conn.execute(
+                        "SELECT id FROM entries WHERE profile_id = ? AND invoice_no = ? LIMIT 1",
+                        (profile_id, parsed.invoice_no),
+                    ).fetchone()
+                    if old:
+                        raise ValueError("这张发票已导入过")
                 entry_id = self.entries.create(profile_id, title=title, parsed=parsed, status="draft")
                 check = check_invoice(parsed, expected_title=title)
                 self.entries.set_check(entry_id, check.status, check.message)
@@ -310,7 +360,7 @@ class Api:
     def pick_files(self, multiple=True, file_types=None):
         """调系统文件选择框，返回路径列表。前端拿不到本地路径，必须走这里。"""
         import webview
-        dialog_type = webview.OPEN_DIALOG
+        dialog_type = _file_dialog_kind(webview, "OPEN", "OPEN_DIALOG")
         types = tuple(file_types) if file_types else ()
         result = self._window.create_file_dialog(
             dialog_type, allow_multiple=multiple, file_types=types
@@ -321,7 +371,7 @@ class Api:
     def pick_folder(self):
         """调系统文件夹选择框，返回目录路径。"""
         import webview
-        result = self._window.create_file_dialog(webview.FOLDER_DIALOG)
+        result = self._window.create_file_dialog(_file_dialog_kind(webview, "FOLDER", "FOLDER_DIALOG"))
         path = (list(result)[0] if result else "") if result else ""
         return {"path": path}
 
@@ -338,6 +388,45 @@ class Api:
     def open_path(self, path):
         _open_local_path(path)
         return {"opened": str(path)}
+
+
+def _file_dialog_kind(webview_module, modern_name: str, legacy_name: str):
+    file_dialog = getattr(webview_module, "FileDialog", None)
+    if file_dialog is not None and hasattr(file_dialog, modern_name):
+        return getattr(file_dialog, modern_name)
+    return getattr(webview_module, legacy_name)
+
+
+def _safe_filename(name: str) -> str:
+    cleaned = re.sub(r"[/\\:\0]+", "_", name).strip()
+    return cleaned or "dropped-file"
+
+
+def _is_inside(root: Path, path: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def _cleanup_old_dropped_files(folder: Path, max_age_seconds: int = 24 * 60 * 60) -> None:
+    if not folder.exists():
+        return
+    cutoff = time.time() - max_age_seconds
+    for path in folder.rglob("*"):
+        if path.is_file() and path.stat().st_mtime < cutoff:
+            path.unlink()
+            _remove_empty_dropped_parent(folder, path.parent)
+
+
+def _remove_empty_dropped_parent(root: Path, folder: Path) -> None:
+    if folder.resolve() == root.resolve() or not _is_inside(root, folder):
+        return
+    try:
+        folder.rmdir()
+    except OSError:
+        pass
 
 
 def _open_local_path(path: str | Path) -> None:

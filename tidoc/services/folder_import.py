@@ -1,9 +1,9 @@
 """文件夹批量导入：扫描一个目录，把一批发票 PDF 快速拆成待创建条目。
 
 设计取向：
-- 批量只处理发票 PDF 与可选 XML；付款截图、查验单后续在条目详情里手动补。
-- 用户不需要提前重命名。每个 PDF 默认就是一条发票，XML 按发票号或近似文件名自动配对。
-- PDF 是必需材料；孤立 XML 只在预览里提示，不单独创建条目。
+- 批量只从发票 PDF 创建条目，可附带匹配到的 XML。
+- 用户不需要提前重命名。XML 优先按发票号配对，其次按近似文件名配对。
+- PDF 是必需材料；孤立 XML、付款截图、查验单只在预览里提示，不单独创建条目。
 """
 
 from __future__ import annotations
@@ -13,8 +13,9 @@ from pathlib import Path
 
 from ..engine.parser import parse_invoice_files
 
-_IGNORED_EXT = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif"}
-_SKIP_PDF_KEYWORDS = ("查验单", "查验", "付款", "支付", "截图")
+_IMAGE_EXT = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif"}
+_PAYMENT_KEYWORDS = ("付款", "支付", "截图")
+_INSPECTION_KEYWORDS = ("查验单", "查验", "验真")
 _STEM_JUNK_RE = re.compile(r"[\s_\-+＋（）()\[\]【】{}.,，。]+")
 _INVOICE_NO_RE = re.compile(r"\d{8,30}")
 
@@ -54,8 +55,12 @@ def _parse_invoice_no(path: Path, att_type: str) -> tuple[str, str]:
         return guessed, f"未能预解析：{exc}"
 
 
-def _is_probably_non_invoice_pdf(path: Path) -> bool:
-    return any(k in path.name for k in _SKIP_PDF_KEYWORDS)
+def _pdf_attachment_type(path: Path) -> str:
+    if any(k in path.name for k in _INSPECTION_KEYWORDS):
+        return "inspection_pdf"
+    if any(k in path.name for k in _PAYMENT_KEYWORDS):
+        return "payment_screenshot"
+    return "invoice_pdf"
 
 
 def _match_xml(pdf: dict, xmls: list[dict], used: set[int]) -> int | None:
@@ -74,8 +79,8 @@ def _match_xml(pdf: dict, xmls: list[dict], used: set[int]) -> int | None:
     return None
 
 
-def scan_folder(folder: str | Path) -> dict:
-    """扫描目录，返回发票 PDF 导入预览。
+def _scan_file_paths(file_paths: list[Path]) -> dict:
+    """扫描一组文件，返回发票 PDF 导入预览。
 
     返回结构：
         {
@@ -87,28 +92,25 @@ def scan_folder(folder: str | Path) -> dict:
             ...
           ],
           "ungrouped": [{...file...}],   # 未匹配到 PDF 的 XML
-          "ignored": [{...file...}],     # 付款截图 / 查验单 / 其他不参与批量的文件
+          "ignored": [{...file...}],     # 付款截图 / 查验单不参与批量的文件
           "total_files": int,
         }
     """
-    folder = Path(folder)
-    if not folder.is_dir():
-        raise NotADirectoryError(f"不是有效目录：{folder}")
-
     pdfs: list[dict] = []
     xmls: list[dict] = []
     ungrouped: list[dict] = []
     ignored: list[dict] = []
     total = 0
 
-    for entry in sorted(folder.iterdir()):
+    for entry in sorted((Path(p) for p in file_paths if Path(p).is_file()), key=lambda p: str(p)):
         if not entry.is_file():
             continue
         suffix = entry.suffix.lower()
         if suffix == ".pdf":
             total += 1
-            if _is_probably_non_invoice_pdf(entry):
-                ignored.append(_file_info(entry, "other", warning="PDF 名称像查验单或付款凭证，批量导入不会处理"))
+            att_type = _pdf_attachment_type(entry)
+            if att_type != "invoice_pdf":
+                ignored.append(_file_info(entry, att_type, warning="这类材料请在条目里添加，或拖到界面后选择绑定条目"))
                 continue
             invoice_no, warning = _parse_invoice_no(entry, "invoice_pdf")
             pdfs.append(_file_info(entry, "invoice_pdf", invoice_no, warning))
@@ -116,9 +118,9 @@ def scan_folder(folder: str | Path) -> dict:
             total += 1
             invoice_no, warning = _parse_invoice_no(entry, "invoice_xml")
             xmls.append(_file_info(entry, "invoice_xml", invoice_no, warning))
-        elif suffix in _IGNORED_EXT:
+        elif suffix in _IMAGE_EXT:
             total += 1
-            ignored.append(_file_info(entry, "other", warning="图片类附件请在条目详情里手动添加"))
+            ignored.append(_file_info(entry, "payment_screenshot", warning="付款截图请在条目里添加，或拖到界面后选择绑定条目"))
         else:
             continue
 
@@ -161,8 +163,26 @@ def scan_folder(folder: str | Path) -> dict:
     }
 
 
+def scan_folder(folder: str | Path) -> dict:
+    """扫描目录，返回发票 PDF 导入预览。"""
+    folder = Path(folder)
+    if not folder.is_dir():
+        raise NotADirectoryError(f"不是有效目录：{folder}")
+    return _scan_file_paths([p for p in folder.rglob("*") if p.is_file()])
+
+
+def scan_files(paths: list[str | Path]) -> dict:
+    """扫描用户多选或拖入的发票文件，返回批量导入预览。"""
+    file_paths = [Path(p) for p in (paths or [])]
+    if not file_paths:
+        raise ValueError("没有选择文件")
+    return _scan_file_paths(file_paths)
+
+
 _TYPE_LABEL = {
     "invoice_pdf": "发票 PDF",
     "invoice_xml": "发票 XML",
+    "payment_screenshot": "付款截图",
+    "inspection_pdf": "查验单 PDF",
     "other": "未导入",
 }

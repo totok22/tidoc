@@ -3,7 +3,8 @@
 <数据根目录>/
 ├─ tidoc.sqlite            结构化数据
 ├─ attachments/<entry_id>/ 附件文件仓库
-└─ exports/                导出的绑定包 / 汇总 / 打印件
+├─ exports/                导出的绑定包 / 汇总 / 打印件
+└─ dropped/                拖拽文件临时中转区
 """
 
 from __future__ import annotations
@@ -34,6 +35,7 @@ class DataRoot:
         self.root.mkdir(parents=True, exist_ok=True)
         self.attachments_dir.mkdir(parents=True, exist_ok=True)
         self.exports_dir.mkdir(parents=True, exist_ok=True)
+        self.dropped_dir.mkdir(parents=True, exist_ok=True)
 
     @property
     def db_path(self) -> Path:
@@ -46,6 +48,10 @@ class DataRoot:
     @property
     def exports_dir(self) -> Path:
         return self.root / "exports"
+
+    @property
+    def dropped_dir(self) -> Path:
+        return self.root / "dropped"
 
     def entry_dir(self, entry_id: str) -> Path:
         """某个条目的附件目录，按需创建。"""

@@ -52,6 +52,13 @@ class AttachmentRepo:
         src = Path(src_path)
         if not src.exists():
             raise FileNotFoundError(f"文件不存在：{src}")
+        sha = _sha256(src)
+        existing = self.db.conn.execute(
+            "SELECT original_name FROM attachments WHERE entry_id = ? AND sha256 = ? LIMIT 1",
+            (entry_id, sha),
+        ).fetchone()
+        if existing:
+            raise ValueError(f"这份文件已添加过：{existing['original_name']}")
         att_id = uuid.uuid4().hex
         dest_dir = self.data_root.entry_dir(entry_id)
         stored_name = self._unique_name(dest_dir, entry_id, att_type, src.suffix)
@@ -61,7 +68,7 @@ class AttachmentRepo:
         self.db.conn.execute(
             """INSERT INTO attachments(id, entry_id, type, original_name, stored_path,
                sha256, note, added_at) VALUES(?,?,?,?,?,?,?,?)""",
-            (att_id, entry_id, att_type, src.name, rel, _sha256(dest), note, _now()),
+            (att_id, entry_id, att_type, src.name, rel, sha, note, _now()),
         )
         self.db.conn.commit()
         return self.get(att_id)
@@ -128,6 +135,13 @@ class AttachmentRepo:
             src = Path(src_path)
             if not src.exists():
                 raise FileNotFoundError(f"文件不存在：{src}")
+            new_sha = _sha256(src)
+            dup = self.db.conn.execute(
+                "SELECT original_name FROM attachments WHERE entry_id = ? AND sha256 = ? AND id <> ? LIMIT 1",
+                (att["entry_id"], new_sha, att_id),
+            ).fetchone()
+            if dup:
+                raise ValueError(f"这份文件已添加过：{dup['original_name']}")
             old_abs = Path(att["abs_path"])
             dest_dir = self.data_root.entry_dir(att["entry_id"])
             stored_name = self._unique_name(dest_dir, att["entry_id"], new_type, src.suffix)
@@ -137,7 +151,7 @@ class AttachmentRepo:
                 old_abs.unlink()
             original_name = src.name
             stored_path = f"{att['entry_id']}/{stored_name}"
-            sha = _sha256(dest)
+            sha = new_sha
         elif att_type and att_type != att["type"]:
             old_abs = Path(att["abs_path"])
             if old_abs.exists():

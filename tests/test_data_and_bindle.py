@@ -2,6 +2,7 @@
 
 import os
 import zipfile
+import base64
 
 from tidoc.db import STATUS_COMPLETE, TYPE_INVOICE_XML
 from tidoc.engine import parse_xml
@@ -108,8 +109,8 @@ def test_completeness_and_status_derivation(repos, sample_xmls):
 
     # 加三种附件 + 填实付
     repos["attachments"].add(eid, sample_xmls[0], TYPE_INVOICE_PDF)
-    repos["attachments"].add(eid, sample_xmls[0], TYPE_PAYMENT)
-    repos["attachments"].add(eid, sample_xmls[0], TYPE_INSPECTION)
+    repos["attachments"].add(eid, sample_xmls[1], TYPE_PAYMENT)
+    repos["attachments"].add(eid, sample_xmls[2], TYPE_INSPECTION)
     repos["entries"].update_field(eid, "paid_amount", "100.00", p["id"])
     repos["entries"].set_check(eid, "pass", "")
     repos["entries"].recompute_status(eid)
@@ -118,6 +119,30 @@ def test_completeness_and_status_derivation(repos, sample_xmls):
     assert e["has_invoice"] and e["has_payment"] and e["has_inspection"]
     assert e["completeness"]["ready"] is True
     assert e["completeness"]["status"] == "complete"
+
+
+def test_attachment_duplicate_rejected(repos, sample_xmls):
+    import pytest
+    from tidoc.db import TYPE_INVOICE_XML, TYPE_PAYMENT
+
+    p = repos["profiles"].create("张三", "李老师")
+    parsed = parse_xml(sample_xmls[0])
+    eid = repos["entries"].create(p["id"], title=parsed.buyer_name, parsed=parsed)
+
+    repos["attachments"].add(eid, sample_xmls[0], TYPE_INVOICE_XML)
+    with pytest.raises(ValueError, match="已添加过"):
+        repos["attachments"].add(eid, sample_xmls[0], TYPE_PAYMENT)
+
+
+def test_dropped_file_cleanup(api):
+    payload = base64.b64encode(b"temporary").decode()
+    saved = api.save_dropped_files([{"name": "a.pdf", "data_url": f"data:application/pdf;base64,{payload}"}])["data"]
+    path = saved["paths"][0]
+    assert os.path.exists(path)
+
+    res = api.cleanup_dropped_files(saved["paths"])["data"]
+    assert res["deleted"] == 1
+    assert not os.path.exists(path)
 
 
 def test_bindle_round_trip_and_tamper(repos, sample_xmls, tmp_path):

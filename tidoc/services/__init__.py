@@ -2,7 +2,7 @@
 
 from .bindle import export_bindle, import_bindle, inspect_bindle
 from .exports import export_attachment_zip, export_overview_xlsx
-from .folder_import import scan_folder
+from .folder_import import scan_files, scan_folder
 from .signing import sign_bytes, sign_file, verify
 from .summary import build_entry_summary, build_summary
 
@@ -13,6 +13,7 @@ __all__ = [
     "export_attachment_zip",
     "export_overview_xlsx",
     "scan_folder",
+    "scan_files",
     "build_summary",
     "build_entry_summary",
     "sign_bytes",
