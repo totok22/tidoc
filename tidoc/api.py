@@ -7,6 +7,9 @@
 from __future__ import annotations
 
 import functools
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 from .db import (
@@ -18,6 +21,7 @@ from .db import (
 )
 from .engine import check_invoice, parse_invoice_files
 from .services import export_bindle, import_bindle, inspect_bindle, scan_folder
+from .services.exports import export_attachment_zip, export_overview_xlsx
 from .services.summary import build_summary
 
 
@@ -107,7 +111,7 @@ class Api:
     # ------------------------------------------------------------ 文件夹批量导入
     @_guard
     def scan_folder(self, folder):
-        """扫描目录，按文件名启发式给出建议分组，供前端预览与调整。"""
+        """扫描目录，按发票 PDF 生成批量导入预览。"""
         return scan_folder(folder)
 
     @_guard
@@ -115,27 +119,27 @@ class Api:
         """按前端确认后的分组批量创建条目。
 
         groups: [{"files": [{"path", "type"}...]}...]
-        每组挑出发票(XML/PDF)做识别，其余作为附件加入。返回创建汇总。
+        每组必须有发票 PDF，可附带一份或多份 XML；付款截图 / 查验单不参与批量。
         """
-        from .db import (TYPE_INSPECTION, TYPE_INVOICE_PDF, TYPE_INVOICE_XML,
-                         TYPE_OTHER, TYPE_PAYMENT)
+        from .db import TYPE_INVOICE_PDF, TYPE_INVOICE_XML
         created, failed = [], []
         for g in (groups or []):
             files = g.get("files") or []
-            xml_path = next((f["path"] for f in files if f.get("type") == TYPE_INVOICE_XML), None)
+            invoice_files = [f for f in files if f.get("type") == TYPE_INVOICE_PDF]
+            xml_files = [f for f in files if f.get("type") == TYPE_INVOICE_XML]
             pdf_path = next((f["path"] for f in files if f.get("type") == TYPE_INVOICE_PDF), None)
+            xml_path = next((f["path"] for f in xml_files), None)
             try:
-                parsed = None
-                if xml_path or pdf_path:
-                    parsed = parse_invoice_files(xml_path, pdf_path)
+                if not pdf_path:
+                    raise ValueError("缺少发票 PDF")
+                parsed = parse_invoice_files(xml_path, pdf_path)
                 entry_id = self.entries.create(profile_id, title=title, parsed=parsed, status="draft")
-                if parsed:
-                    check = check_invoice(parsed, expected_title=title)
-                    self.entries.set_check(entry_id, check.status, check.message)
-                # 附件按类型加入
-                for f in files:
-                    t = f.get("type") or TYPE_OTHER
-                    self.attachments.add(entry_id, f["path"], t)
+                check = check_invoice(parsed, expected_title=title)
+                self.entries.set_check(entry_id, check.status, check.message)
+                for f in invoice_files:
+                    self.attachments.add(entry_id, f["path"], TYPE_INVOICE_PDF)
+                for f in xml_files:
+                    self.attachments.add(entry_id, f["path"], TYPE_INVOICE_XML)
                 self.entries.recompute_status(entry_id)
                 created.append(entry_id)
             except Exception as exc:  # noqa: BLE001 — 单组失败不阻断其余
@@ -217,6 +221,35 @@ class Api:
     def set_attachment_note(self, att_id, note):
         return self.attachments.set_note(att_id, note)
 
+    @_guard
+    def update_attachment(self, att_id, fields=None):
+        fields = fields or {}
+        att = self.attachments.update(
+            att_id,
+            att_type=fields.get("type"),
+            src_path=fields.get("src_path"),
+            note=fields.get("note"),
+        )
+        if att and att.get("entry_id"):
+            self.entries.recompute_status(att["entry_id"])
+        return att
+
+    @_guard
+    def open_attachment(self, att_id):
+        att = self.attachments.get(att_id)
+        if not att:
+            raise FileNotFoundError(f"附件不存在：{att_id}")
+        _open_local_path(att["abs_path"])
+        return {"opened": att["abs_path"]}
+
+    @_guard
+    def reveal_attachment(self, att_id):
+        att = self.attachments.get(att_id)
+        if not att:
+            raise FileNotFoundError(f"附件不存在：{att_id}")
+        _reveal_local_path(att["abs_path"])
+        return {"revealed": att["abs_path"]}
+
     # ------------------------------------------------------------ 汇总 / 绑定包
     @_guard
     def build_summary(self, entry_ids):
@@ -228,6 +261,24 @@ class Api:
         out_path = self.data_root.exports_dir / f"{name}.tidoc"
         lookup = {p["id"]: p for p in self.profiles.list()}
         result = export_bindle(self.entries, self.attachments, entry_ids, out_path, lookup)
+        return {"path": str(result), "count": len(entry_ids)}
+
+    @_guard
+    def export_overview_excel(self, entry_ids, out_name=None):
+        name = out_name or "报账总览"
+        out_path = self.data_root.exports_dir / f"{name}.xlsx"
+        lookup = {p["id"]: p for p in self.profiles.list()}
+        result = export_overview_xlsx(self.entries, lookup, entry_ids, out_path)
+        return {"path": str(result), "count": len(entry_ids)}
+
+    @_guard
+    def export_attachment_archive(self, entry_ids, out_name=None):
+        name = out_name or "附件整理包"
+        out_path = self.data_root.exports_dir / f"{name}.zip"
+        lookup = {p["id"]: p for p in self.profiles.list()}
+        result = export_attachment_zip(
+            self.entries, self.data_root.attachments_dir, lookup, entry_ids, out_path
+        )
         return {"path": str(result), "count": len(entry_ids)}
 
     @_guard
@@ -276,4 +327,38 @@ class Api:
 
     @_guard
     def data_root_path(self):
-        return {"root": str(self.data_root.root)}
+        return {
+            "root": str(self.data_root.root),
+            "attachments": str(self.data_root.attachments_dir),
+            "exports": str(self.data_root.exports_dir),
+            "db": str(self.data_root.db_path),
+        }
+
+    @_guard
+    def open_path(self, path):
+        _open_local_path(path)
+        return {"opened": str(path)}
+
+
+def _open_local_path(path: str | Path) -> None:
+    p = Path(path)
+    if not p.exists():
+        raise FileNotFoundError(f"文件不存在：{p}")
+    if sys.platform == "darwin":
+        subprocess.Popen(["open", str(p)])
+    elif os.name == "nt":
+        os.startfile(str(p))  # type: ignore[attr-defined]
+    else:
+        subprocess.Popen(["xdg-open", str(p)])
+
+
+def _reveal_local_path(path: str | Path) -> None:
+    p = Path(path)
+    if not p.exists():
+        raise FileNotFoundError(f"文件不存在：{p}")
+    if sys.platform == "darwin":
+        subprocess.Popen(["open", "-R", str(p)])
+    elif os.name == "nt":
+        subprocess.Popen(["explorer", "/select,", str(p)])
+    else:
+        _open_local_path(p.parent)

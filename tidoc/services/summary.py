@@ -45,7 +45,7 @@ def build_entry_summary(entry: dict) -> dict:
         "paid_amount": fields.get("paid_amount", {}).get("current", ""),
         "actual_item_name": fields.get("actual_item_name", {}).get("current", ""),
         "notes": fields.get("notes", {}).get("current", ""),
-        "modified_fields": [f for f, v in fields.items() if v.get("modified")],
+        "modified_fields": [f for f, v in fields.items() if v.get("modified") and f != "notes"],
     }
 
 

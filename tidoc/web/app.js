@@ -5,7 +5,7 @@ const State = {
   profileById: {},
   currentProfileId: null,
   activeTitle: '',
-  rail: 'all',
+  quickView: 'all',
   entries: [],
   selected: new Set(),
   density: 'comfortable',
@@ -133,9 +133,9 @@ function currentFilters() {
   const dto = $('#filterDateTo').value;
   const sort = $('#sortSelect').value;
 
-  if (State.rail === 'draft') f.status = 'draft';
-  else if (State.rail === 'warn') f.check_status = 'warning';
-  else if (State.rail === 'modified') f.modified_only = true;
+  if (State.quickView === 'warning') f.check_status = 'warning';
+  else if (State.quickView === 'modified') f.modified_only = true;
+  else if (State.quickView === 'complete') f.status = 'complete';
 
   if (status) f.status = status;
   if (check) f.check_status = check;
@@ -152,6 +152,9 @@ function currentFilters() {
 async function refreshEntries() {
   try {
     State.entries = await Api.listEntries(currentFilters());
+    if (State.quickView === 'incomplete') {
+      State.entries = State.entries.filter((e) => (e.completeness?.status || e.status) !== 'complete');
+    }
   } catch (e) {
     toast(e.message, 'err');
     State.entries = [];
@@ -187,8 +190,13 @@ function renderEntries() {
 
   empty.hidden = !emptyAll;
   if (emptyAll) renderEmptyState();
-  $('#selectionBar').classList.toggle('hidden', State.selected.size === 0);
-  $('#selCount').textContent = `已选 ${State.selected.size}`;
+  const hasSelection = State.selected.size > 0;
+  $('#selectionBar').classList.toggle('empty', !hasSelection);
+  $('#selCount').textContent = hasSelection ? `已选 ${State.selected.size}` : '未选择';
+  ['clearSelBtn', 'batchSummaryBtn', 'batchExportBtn', 'batchPrintBtn', 'batchDeleteBtn'].forEach((id) => {
+    const btn = $('#' + id);
+    if (btn) btn.disabled = !hasSelection;
+  });
 }
 
 function entryCard(e) {
@@ -227,46 +235,79 @@ function entryCard(e) {
     ? `<span class="badge complete-ready" title="材料齐全、实付已填、校验通过">齐备</span>`
     : `<span class="badge status-${dstatus}" title="${comp.missing.length ? '待补：' + comp.missing.join('、') : ''}">${STATUS_LABEL[dstatus] || dstatus}</span>`;
 
+  const itemTitle = actualCur || (e.items && e.items[0] && (e.items[0].actual_name || e.items[0].name)) || '未填物资名称';
   const notesPreview = notesCur
-    ? `<span class="notes-preview" title="${esc(notesCur)}">${iconNote(12)}${esc(notesCur)}</span>`
-    : (actualCur ? `<span class="notes-preview">${iconBox(12)}${esc(actualCur)}</span>` : '');
+    ? `<span class="notes-preview important" title="${esc(notesCur)}">${iconNote(12)}${esc(notesCur)}</span>`
+    : '<span class="notes-preview muted">无备注</span>';
 
   const main = el('div', 'entry-main', `
     <div class="entry-line1">
       ${chip}
-      <span class="entry-seller">${esc(e.seller || '（未识别销售方）')}</span>
+      <span class="entry-item-title" title="${esc(itemTitle)}">${esc(itemTitle)}</span>
       ${compBadge}
       ${checkBadge}
       ${modified}
     </div>
     <div class="entry-line2">
+      <span class="seller-muted" title="${esc(e.seller || '')}">${esc(e.seller || '未识别销售方')}</span>
       <span class="mono">${esc(e.invoice_no || '无发票号')}</span>
       <span>${esc(dateShort(e.invoice_date))}</span>
       ${attDots}
-      ${notesPreview}
     </div>`);
+  if (notesCur || actualCur) {
+    main.insertAdjacentHTML('beforeend', `<div class="entry-note-line">${notesPreview}</div>`);
+  }
 
   const right = el('div', 'entry-right');
   right.innerHTML = `
     <div class="entry-total">${fmtMoney(e.total)}</div>
     ${paidCur ? `<div class="entry-paid">实付 <b>${fmtMoney(paidCur)}</b></div>` : '<div class="entry-paid muted">实付未填</div>'}
-    <div class="entry-quick">
-      <button data-quick="open" title="查看详情">详情</button>
-      <button data-quick="note" title="追加备注">备注</button>
-      <button data-quick="del" class="danger" title="删除">删</button>
-    </div>`;
-  right.querySelectorAll('[data-quick]').forEach((b) => {
-    b.onclick = (ev) => {
+    <div class="entry-inline-actions">
+      <button data-card-action="paid" title="填写实付金额">实付</button>
+      <button data-card-action="pay" title="添加付款截图">付款</button>
+      <button data-card-action="inspect" title="添加查验单">查验</button>
+    </div>
+    <div class="entry-open-hint">点击打开</div>`;
+  right.querySelectorAll('[data-card-action]').forEach((b) => {
+    b.onclick = async (ev) => {
       ev.stopPropagation();
-      const a = b.dataset.quick;
-      if (a === 'open') openEntryDetail(e.id);
-      else if (a === 'note') quickNoteFlow(e);
-      else if (a === 'del') quickDelete(e);
+      const action = b.dataset.cardAction;
+      if (action === 'paid') await quickPaidFlow(e);
+      else if (action === 'pay') await quickAddAttachment(e.id, 'payment_screenshot');
+      else if (action === 'inspect') await quickAddAttachment(e.id, 'inspection_pdf');
     };
   });
 
   card.append(check, stripe, main, right);
-  card.onclick = () => openEntryDetail(e.id);
+  let openTimer = null;
+  card.onclick = () => {
+    openTimer = setTimeout(() => openEntryDetail(e.id), 260);
+  };
+  card.ondblclick = async (ev) => {
+    ev.preventDefault();
+    if (openTimer) clearTimeout(openTimer);
+    await quickPaidFlow(e);
+  };
+  card.oncontextmenu = (ev) => {
+    ev.preventDefault();
+    openEntryMenu(ev.clientX, ev.clientY, e);
+  };
+  card.ondragover = (ev) => {
+    ev.preventDefault();
+    card.classList.add('card-dragging');
+  };
+  card.ondragleave = () => card.classList.remove('card-dragging');
+  card.ondrop = async (ev) => {
+    ev.preventDefault();
+    card.classList.remove('card-dragging');
+    try {
+      const added = await addDroppedMaterialFiles(e.id, [...(ev.dataTransfer?.files || [])]);
+      if (added) {
+        await refreshEntries();
+        toast('材料已添加', 'ok');
+      }
+    } catch (err) { toast(err.message, 'err'); }
+  };
   return card;
 }
 
@@ -297,6 +338,7 @@ function renderActiveFilters() {
     x.onclick = onClear; c.appendChild(x);
     chips.push(c);
   };
+  if (State.quickView !== 'all') mkChip('视图：' + quickViewLabel(State.quickView), () => { setQuickView('all'); });
   if ($('#filterStatus').value) mkChip('状态：' + STATUS_LABEL[$('#filterStatus').value], () => { $('#filterStatus').value = ''; refreshEntries(); });
   if ($('#filterCheck').value) mkChip('校验：' + CHECK_LABEL[$('#filterCheck').value], () => { $('#filterCheck').value = ''; refreshEntries(); });
   if ($('#filterProfile').value) mkChip('报账人：' + (State.profileById[$('#filterProfile').value]?.name || ''), () => { $('#filterProfile').value = ''; refreshEntries(); });
@@ -305,7 +347,11 @@ function renderActiveFilters() {
   if ($('#filterDateFrom').value || $('#filterDateTo').value) mkChip(`日期 ${$('#filterDateFrom').value || '…'}–${$('#filterDateTo').value || '…'}`, () => { $('#filterDateFrom').value = ''; $('#filterDateTo').value = ''; refreshEntries(); });
 
   wrap.innerHTML = '';
-  if (!chips.length) { wrap.classList.add('hidden'); return; }
+  if (!chips.length) {
+    wrap.classList.add('hidden');
+    $('#advancedDot').classList.add('hidden');
+    return;
+  }
   wrap.classList.remove('hidden');
   chips.forEach((c) => wrap.appendChild(c));
   $('#advancedDot').classList.toggle('hidden', !chips.length);
@@ -315,7 +361,22 @@ function hasAnyFilter() {
   return !!($('#filterStatus').value || $('#filterCheck').value || $('#filterProfile').value ||
     $('#filterKeyword').value || $('#filterAmountMin').value || $('#filterAmountMax').value ||
     $('#filterDateFrom').value || $('#filterDateTo').value ||
-    State.activeTitle || State.rail !== 'all');
+    State.activeTitle || State.quickView !== 'all');
+}
+
+function quickViewLabel(v) {
+  return { all: '全部', incomplete: '待补材料', warning: '需确认', modified: '已修改', complete: '齐备' }[v] || v;
+}
+
+function updateQuickViewButtons() {
+  $$('[data-view]').forEach((b) => b.classList.toggle('active', b.dataset.view === State.quickView));
+}
+
+function setQuickView(v) {
+  State.quickView = v || 'all';
+  updateQuickViewButtons();
+  State.selected.clear();
+  refreshEntries();
 }
 
 function showSearchHintIfEmpty() {
@@ -333,8 +394,74 @@ async function selectAllVisible() {
   State.entries.forEach((e) => State.selected.add(e.id));
   renderEntries();
 }
+function selectVisibleWhere(predicate) {
+  State.selected.clear();
+  State.entries.filter(predicate).forEach((e) => State.selected.add(e.id));
+  renderEntries();
+}
 
 // ------------------------------------------------------------------ 卡片快捷
+async function quickPaidFlow(e) {
+  const cur = (await Api.getEntry(e.id)).fields?.paid_amount?.current || '';
+  const body = el('div');
+  body.innerHTML = `
+    <div class="form-row">
+      <label>实付金额</label>
+      <input id="qpInput" type="number" step="0.01" value="${esc(cur)}" placeholder="例如 128.50"/>
+    </div>`;
+  const m = modal({
+    title: '填写实付金额',
+    body,
+    footer: [
+      mkBtn('取消', 'ghost', () => m.close()),
+      mkBtn('保存', 'primary', async () => {
+        try {
+          await Api.updateField(e.id, 'paid_amount', body.querySelector('#qpInput').value, State.currentProfileId);
+          m.close(); await refreshEntries(); toast('实付金额已保存', 'ok');
+        } catch (err) { toast(err.message, 'err'); }
+      }),
+    ],
+  });
+  setTimeout(() => body.querySelector('#qpInput')?.focus(), 20);
+}
+
+async function quickAddAttachment(entryId, type) {
+  try {
+    const res = await Api.pickFiles(type === 'payment_screenshot');
+    const paths = res.paths || [];
+    if (!paths.length) return;
+    for (const p of paths) await Api.addAttachment(entryId, p, type);
+    await refreshEntries();
+    toast('材料已添加', 'ok');
+  } catch (err) { toast(err.message, 'err'); }
+}
+
+function openEntryMenu(x, y, e) {
+  closeEntryMenu();
+  const menu = el('div', 'entry-context-menu');
+  const item = (label, fn, danger) => {
+    const b = el('button', danger ? 'danger' : '', esc(label));
+    b.onclick = async () => { closeEntryMenu(); await fn(); };
+    menu.appendChild(b);
+  };
+  item('打开条目', () => openEntryDetail(e.id));
+  item('填写实付金额', () => quickPaidFlow(e));
+  item('添加付款截图', () => quickAddAttachment(e.id, 'payment_screenshot'));
+  item('添加查验单', () => quickAddAttachment(e.id, 'inspection_pdf'));
+  item('添加发票 PDF', () => quickAddAttachment(e.id, 'invoice_pdf'));
+  item('编辑备注', () => quickNoteFlow(e));
+  item('删除条目', () => quickDelete(e), true);
+  menu.style.left = Math.min(x, window.innerWidth - 190) + 'px';
+  menu.style.top = Math.min(y, window.innerHeight - 260) + 'px';
+  document.body.appendChild(menu);
+  setTimeout(() => document.addEventListener('click', closeEntryMenu, { once: true }), 0);
+}
+
+function closeEntryMenu() {
+  const old = $('.entry-context-menu');
+  if (old) old.remove();
+}
+
 async function quickNoteFlow(e) {
   const cur = (await Api.getEntry(e.id)).fields?.notes?.current || '';
   const body = el('div');
@@ -375,24 +502,15 @@ function bindEvents() {
     };
   });
 
-  $$('[data-rail]').forEach((btn) => {
-    btn.onclick = () => {
-      $$('[data-rail]').forEach((b) => b.classList.remove('active'));
-      btn.classList.add('active');
-      const prev = State.rail;
-      State.rail = btn.dataset.rail;
-      if (prev !== State.rail) {
-        if (State.rail === 'draft') $('#filterStatus').value = '';
-        if (State.rail === 'warn') $('#filterCheck').value = '';
-      }
-      refreshEntries();
-    };
+  $$('[data-view]').forEach((btn) => {
+    btn.onclick = () => setQuickView(btn.dataset.view);
   });
 
   let kwTimer;
   const relist = () => refreshEntries();
-  $('#filterStatus').onchange = relist;
-  $('#filterCheck').onchange = relist;
+  const relistFromAdvanced = () => { State.quickView = 'all'; updateQuickViewButtons(); refreshEntries(); };
+  $('#filterStatus').onchange = relistFromAdvanced;
+  $('#filterCheck').onchange = relistFromAdvanced;
   $('#filterProfile').onchange = relist;
   $('#sortSelect').onchange = relist;
   $('#filterKeyword').oninput = () => { showSearchHintIfEmpty(); clearTimeout(kwTimer); kwTimer = setTimeout(relist, 220); };
@@ -419,14 +537,19 @@ function bindEvents() {
 
   $('#newEntryBtn').onclick = openNewEntry;
   $('#batchImportBtn').onclick = openBatchImport;
+  $('#settingsBtn').onclick = openSettings;
   $('#emptyNew').onclick = () => openNewEntry();
-  $('#railExport').onclick = () => doExport(State.selected.size ? [...State.selected] : State.entries.map((e) => e.id));
-  $('#railImport').onclick = doImport;
-  $('#railPrint').onclick = () => openPrintDialog(State.selected.size ? [...State.selected] : State.entries.map((e) => e.id));
+  $('#actionExport').onclick = () => doExport(State.selected.size ? [...State.selected] : State.entries.map((e) => e.id));
+  $('#actionImport').onclick = doImport;
+  $('#actionPrint').onclick = () => openPrintDialog(State.selected.size ? [...State.selected] : State.entries.map((e) => e.id));
 
   $('#selectAllBtn').onclick = selectAllVisible;
+  $('#selectIncompleteBtn').onclick = () => selectVisibleWhere((e) => (e.completeness?.status || e.status) !== 'complete');
+  $('#selectWarningBtn').onclick = () => selectVisibleWhere((e) => e.check_status === 'warning' || e.check_status === 'blocked');
   $('#clearSelBtn').onclick = () => { State.selected.clear(); renderEntries(); };
   $('#batchSummaryBtn').onclick = exportSummary;
+  $('#batchExportBtn').onclick = () => doExport([...State.selected]);
+  $('#batchPrintBtn').onclick = () => openPrintDialog([...State.selected]);
   $('#batchDeleteBtn').onclick = batchDelete;
 
   document.addEventListener('keydown', (e) => {
@@ -445,9 +568,8 @@ function clearAllFilters() {
   ['filterStatus', 'filterCheck', 'filterProfile', 'filterKeyword', 'filterAmountMin', 'filterAmountMax', 'filterDateFrom', 'filterDateTo'].forEach((id) => { const n = $('#' + id); if (n) n.value = ''; });
   $$('.title-tab').forEach((t) => t.classList.remove('active'));
   $$('.title-tab')[0].classList.add('active');
-  $$('[data-rail]').forEach((b) => b.classList.remove('active'));
-  $$('[data-rail]')[0].classList.add('active');
-  State.rail = 'all';
+  State.quickView = 'all';
+  updateQuickViewButtons();
   State.activeTitle = '';
   showSearchHintIfEmpty();
   refreshEntries();
@@ -555,6 +677,66 @@ function openProfileManager(forceCreate) {
     title: '身份管理',
     body: wrap,
     footer: [addBtn, mkBtn('关闭', 'ghost', () => m.close())],
+  });
+}
+
+async function openSettings() {
+  let paths, printStatus;
+  try {
+    paths = await Api.dataRoot();
+    printStatus = await Api.printComponentStatus();
+  } catch (e) { toast(e.message, 'err'); return; }
+  const body = el('div');
+  const pathRow = (label, path) => `
+    <div class="settings-path">
+      <b>${esc(label)}</b>
+      <code title="${esc(path)}">${esc(path)}</code>
+      <button class="btn small ghost" data-open-path="${esc(path)}">打开</button>
+    </div>`;
+  const printLine = printStatus.available
+    ? '<span class="settings-ok">已可用</span>'
+    : `<span class="settings-warn">未安装${printStatus.missing?.length ? '：' + esc(printStatus.missing.join('、')) : ''}</span>`;
+  body.innerHTML = `
+    <div class="settings-grid">
+      <button class="settings-card" id="settingsProfiles">
+        <b>身份与报账人</b>
+        <span>维护本人姓名、审核人、学号、银行卡等打印信息。</span>
+      </button>
+      <button class="settings-card" data-open-path="${esc(paths.exports)}">
+        <b>导出文件</b>
+        <span>查看绑定包、总览 Excel、附件整理包和打印材料。</span>
+      </button>
+      <button class="settings-card" data-open-path="${esc(paths.attachments)}">
+        <b>附件仓库</b>
+        <span>查看程序保存的发票 PDF、付款截图和查验单副本。</span>
+      </button>
+      <div class="settings-card passive">
+        <b>打印组件</b>
+        <span>${printLine}</span>
+      </div>
+    </div>
+    <div class="detail-section">
+      <h3>数据位置<span class="h3-line"></span></h3>
+      <div class="hint" style="margin-bottom:10px">所有文件都保存在本机。打开文件会调用系统默认应用；macOS 上 PDF 会直接进入预览。</div>
+      ${pathRow('数据目录', paths.root)}
+      ${pathRow('附件仓库', paths.attachments)}
+      ${pathRow('导出目录', paths.exports)}
+      ${pathRow('数据库', paths.db)}
+    </div>`;
+  body.querySelectorAll('[data-open-path]').forEach((btn) => {
+    btn.onclick = async () => {
+      try { await Api.openPath(btn.dataset.openPath); }
+      catch (e) { toast(e.message, 'err'); }
+    };
+  });
+  body.querySelector('#settingsProfiles').onclick = () => {
+    m.close();
+    openProfileManager(false);
+  };
+  const m = modal({
+    title: '设置',
+    body,
+    footer: [mkBtn('关闭', 'ghost', () => m.close())],
   });
 }
 
@@ -681,56 +863,65 @@ async function openBatchImport() {
   let scan;
   try { scan = await Api.scanFolder(folder); } catch (e) { toast('扫描失败：' + e.message, 'err'); return; }
 
-  // 可编辑的分组模型：ungrouped 里的文件可指派到某组或忽略
-  const TYPE_OPTS = [
-    ['invoice_pdf', '发票 PDF'], ['invoice_xml', '发票 XML'],
-    ['payment_screenshot', '付款截图'], ['inspection_pdf', '查验单'], ['other', '其他'],
-  ];
-  const groups = scan.groups.map((g) => ({ label: g.label, files: g.files.map((f) => ({ ...f })) }));
-  const ungrouped = scan.ungrouped.map((f) => ({ ...f, ignore: true }));
+  const groups = scan.groups.map((g) => ({
+    label: g.label,
+    selected: g.selected !== false,
+    warnings: g.warnings || [],
+    files: g.files.map((f) => ({ ...f })),
+  }));
+  const ungrouped = scan.ungrouped || [];
+  const ignored = scan.ignored || [];
 
   const body = el('div');
   const render = () => {
-    const typeSel = (f, idx, gi) => `<select data-type data-gi="${gi}" data-fi="${idx}" class="bi-type">
-      ${TYPE_OPTS.map(([v, l]) => `<option value="${v}"${v === f.type ? ' selected' : ''}>${l}</option>`).join('')}
-    </select>`;
     const groupRows = groups.map((g, gi) => `
-      <div class="bi-group">
+      <div class="bi-group${g.selected ? '' : ' off'}">
         <div class="bi-group-head">
+          <label class="bi-ignore"><input type="checkbox" data-bi-group="${gi}" ${g.selected ? 'checked' : ''}/> 导入</label>
           <b>组 ${esc(g.label)}</b>
-          <span class="bi-count">${g.files.length} 个文件</span>
+          <span class="bi-count">${g.files.length} 个文件 · PDF 必导${g.files.some((f) => f.type === 'invoice_xml') ? ' · 已配 XML' : ''}</span>
         </div>
-        ${g.files.map((f, fi) => `
+        ${g.files.map((f) => `
           <div class="bi-file">
+            <span class="attach-type">${esc(f.type_label || attachTypeLabel(f.type))}</span>
             <span class="bi-name" title="${esc(f.name)}">${esc(f.name)}</span>
-            ${typeSel(f, fi, gi)}
+            ${f.warning ? `<span class="bi-warning">${esc(f.warning)}</span>` : ''}
           </div>`).join('')}
-      </div>`).join('') || '<div class="hint">没有可分组的文件。</div>';
+        ${(g.warnings || []).length ? `<div class="bi-warning">${g.warnings.map(esc).join('；')}</div>` : ''}
+      </div>`).join('') || '<div class="hint">没有找到可导入的发票 PDF。批量导入要求每条至少有一个发票 PDF，XML 可以没有。</div>';
 
     const ungroupedRows = ungrouped.length ? `
       <div class="detail-section" style="margin-top:16px">
-        <h3>未能自动分组<span class="h3-line"></span></h3>
-        <div class="hint" style="margin-bottom:10px">这些文件名里没有识别到组号，可勾选并入新的一条，或忽略。</div>
-        ${ungrouped.map((f, ui) => `
+        <h3>未匹配 XML<span class="h3-line"></span></h3>
+        <div class="hint" style="margin-bottom:10px">这些 XML 没有对应发票 PDF，不会单独创建条目。</div>
+        <div class="bi-muted-list">${ungrouped.map((f) => `
           <div class="bi-file">
-            <label class="bi-ignore"><input type="checkbox" data-ung="${ui}" ${f.ignore ? '' : 'checked'}/> 导入</label>
+            <span class="attach-type">${esc(f.type_label || 'XML')}</span>
             <span class="bi-name" title="${esc(f.name)}">${esc(f.name)}</span>
-          </div>`).join('')}
+            <span class="bi-warning">${esc(f.warning || '')}</span>
+          </div>`).join('')}</div>
+      </div>` : '';
+
+    const ignoredRows = ignored.length ? `
+      <div class="detail-section" style="margin-top:16px">
+        <h3>未参与批量<span class="h3-line"></span></h3>
+        <div class="hint" style="margin-bottom:10px">付款截图、查验单和图片类附件请在条目详情里手动添加。</div>
+        <div class="bi-muted-list">${ignored.map((f) => `
+          <div class="bi-file">
+            <span class="attach-type">跳过</span>
+            <span class="bi-name" title="${esc(f.name)}">${esc(f.name)}</span>
+            <span class="bi-warning">${esc(f.warning || '')}</span>
+          </div>`).join('')}</div>
       </div>` : '';
 
     body.innerHTML = `
-      <div class="hint">在 <b>${esc(folder)}</b> 找到 <b>${scan.total_files}</b> 个文件，建议分为 <b>${groups.length}</b> 组。每组将创建一条报账条目，可调整每个文件的类型。</div>
+      <div class="hint">在 <b>${esc(folder)}</b> 找到 <b>${scan.total_files}</b> 个候选文件。将按 <b>${scan.invoice_pdf_count || groups.length}</b> 个发票 PDF 创建条目，已自动匹配 <b>${scan.matched_xml_count || 0}</b> 个 XML；付款截图和查验单不参与批量。</div>
       <div class="bi-groups" style="margin-top:14px">${groupRows}</div>
-      ${ungroupedRows}`;
+      ${ungroupedRows}
+      ${ignoredRows}`;
 
-    body.querySelectorAll('[data-type]').forEach((sel) => {
-      sel.onchange = () => {
-        const gi = +sel.dataset.gi, fi = +sel.dataset.fi;
-        groups[gi].files[fi].type = sel.value;
-      };
-    });
-    body.querySelectorAll('[data-ung]').forEach((cb) => {
-      cb.onchange = () => { ungrouped[+cb.dataset.ung].ignore = !cb.checked; };
+    body.querySelectorAll('[data-bi-group]').forEach((cb) => {
+      cb.onchange = () => { groups[+cb.dataset.biGroup].selected = cb.checked; render(); };
     });
   };
   render();
@@ -740,11 +931,10 @@ async function openBatchImport() {
     wide: true, body,
     footer: [
       mkBtn('取消', 'ghost', () => m.close()),
-      mkBtn(`创建 ${groups.length} 条`, 'primary', async () => {
-        // 未分组里勾选导入的，合成额外一组
-        const extra = ungrouped.filter((f) => !f.ignore);
-        const payload = groups.map((g) => ({ label: g.label, files: g.files.map((f) => ({ path: f.path, type: f.type })) }));
-        if (extra.length) payload.push({ label: '未分组', files: extra.map((f) => ({ path: f.path, type: f.type })) });
+      mkBtn('创建选中条目', 'primary', async () => {
+        const payload = groups
+          .filter((g) => g.selected)
+          .map((g) => ({ label: g.label, files: g.files.map((f) => ({ path: f.path, type: f.type })) }));
         if (!payload.length) { toast('没有可创建的分组', 'err'); return; }
         try {
           const r = await Api.batchCreateEntries(State.currentProfileId, payload);
@@ -792,9 +982,17 @@ async function openEntryDetail(entryId) {
     const has = list.length > 0;
     const rows = list.map((a) => `
       <div class="attach-item">
-        <span style="flex:1" title="${esc(a.stored_path)}">${esc(a.original_name)}</span>
-        ${a.note ? `<span style="font-size:11px;color:var(--ink-soft)">· ${esc(a.note)}</span>` : ''}
-        <button class="btn small danger" data-del-att="${a.id}">删除</button>
+        <span class="attach-name" title="${esc(a.abs_path || a.stored_path)}">${esc(a.original_name)}</span>
+        <div class="attach-actions">
+          <select class="attach-type-select" data-att-type="${a.id}">
+            ${ATTACHMENT_TYPE_OPTS.map(([v, l]) => `<option value="${v}"${v === a.type ? ' selected' : ''}>${l}</option>`).join('')}
+          </select>
+          <input class="attach-note" data-att-note="${a.id}" value="${esc(a.note || '')}" placeholder="备注"/>
+          <button class="btn small ghost" data-open-att="${a.id}">打开</button>
+          <button class="btn small ghost" data-reveal-att="${a.id}">位置</button>
+          <button class="btn small ghost" data-replace-att="${a.id}">替换</button>
+          <button class="btn small danger" data-del-att="${a.id}">删除</button>
+        </div>
       </div>`).join('');
     return `
       <div class="att-group${has ? ' has' : ' missing'}">
@@ -824,53 +1022,72 @@ async function openEntryDetail(entryId) {
     || '<div class="attach-item" style="color:var(--ink-soft)">暂无修改记录</div>';
 
   const comp = e.completeness || { ready: false, missing: [] };
+  const flowStep = (on, label, sub) => `
+    <div class="flow-step${on ? ' on' : ''}">
+      <span class="flow-dot"></span>
+      <b>${label}</b>
+      <small>${sub}</small>
+    </div>`;
+  const materialFlow = `
+    <div class="flow-strip">
+      ${flowStep(e.has_invoice, '发票', e.has_invoice ? '已导入' : '需要 PDF')}
+      ${flowStep(e.has_payment, '付款', e.has_payment ? '已上传' : '后续补截图')}
+      ${flowStep(e.has_inspection, '查验', e.has_inspection ? '已上传' : '后续补查验单')}
+      ${flowStep(!!((f.paid_amount || {}).current), '实付', (f.paid_amount || {}).current ? fmtMoney((f.paid_amount || {}).current) : '手动填写')}
+    </div>`;
   const compLine = comp.ready
     ? `<p class="hint ok-hint" style="margin-top:10px">材料齐全、实付已填、校验通过。</p>`
     : (comp.missing.length ? `<p class="hint" style="margin-top:10px">待补：${comp.missing.map(esc).join('、')}。</p>` : '');
 
   body.innerHTML = `
-    <div class="detail-section">
-      <h3>发票信息 ${e.check_status && e.check_status !== 'pass' ? `<span class="badge ${e.check_status}">${CHECK_LABEL[e.check_status]}</span>` : ''}<span class="h3-line"></span></h3>
-      <div class="kv">
-        ${lockedKV('发票号码', 'invoice_no', e.invoice_no, true)}
-        ${lockedKV('发票日期', 'invoice_date', e.invoice_date)}
-        ${lockedKV('销售方', 'seller', e.seller)}
-        ${lockedKV('购买方抬头', 'buyer_name', e.buyer_name)}
-        ${lockedKV('价税合计', 'total', e.total, true, true)}
-        ${lockedKV('税号', 'buyer_tax_id', e.buyer_tax_id, true)}
-        <span class="k">报账人</span><span>${esc(owner ? owner.name : '—')} → ${esc(owner ? owner.reviewer : '—')}</span>
+    ${materialFlow}
+    <div class="detail-top-grid">
+      <div class="detail-section">
+        <h3>关键信息 ${e.check_status && e.check_status !== 'pass' ? `<span class="badge ${e.check_status}">${CHECK_LABEL[e.check_status]}</span>` : ''}<span class="h3-line"></span></h3>
+        <div class="kv compact">
+          ${lockedKV('发票号码', 'invoice_no', e.invoice_no, true)}
+          ${lockedKV('发票日期', 'invoice_date', e.invoice_date)}
+          ${lockedKV('销售方', 'seller', e.seller)}
+          ${lockedKV('价税合计', 'total', e.total, true, true)}
+          ${lockedKV('购买方', 'buyer_name', e.buyer_name)}
+          <span class="k">报账人</span><span>${esc(owner ? owner.name : '—')} → ${esc(owner ? owner.reviewer : '—')}</span>
+        </div>
+        ${e.check_message ? `<p class="hint warn compact-hint">${esc(e.check_message)}</p>` : ''}
       </div>
-      ${e.check_message ? `<p class="hint warn" style="margin-top:12px">${esc(e.check_message)}</p>` : ''}
+
+      <div class="detail-section">
+        <h3>需要手动确认<span class="h3-line"></span></h3>
+        <div class="form-grid compact">
+          ${editRow('实付金额', 'paid_amount', f.paid_amount)}
+          ${editRow('实际物资名称', 'actual_item_name', f.actual_item_name)}
+        </div>
+        ${editRow('备注', 'notes', f.notes, true)}
+        ${compLine}
+      </div>
     </div>
 
     <div class="detail-section">
-      <h3>填写信息<span class="h3-line"></span></h3>
-      <div class="form-grid">
-        ${editRow('实付金额', 'paid_amount', f.paid_amount)}
-        ${editRow('实际物资名称', 'actual_item_name', f.actual_item_name)}
+      <h3>报账材料<span class="h3-line"></span></h3>
+      <div class="material-drop" id="materialDrop">
+        <b>拖拽材料到这里</b>
+        <span>PDF 自动识别为发票或查验单，图片自动作为付款截图；也可用下方添加按钮。</span>
       </div>
-      ${editRow('备注', 'notes', f.notes, true)}
+      <div class="att-groups">${attachSection}</div>
     </div>
 
-    <div class="detail-section">
-      <h3>物品明细<span class="h3-line"></span></h3>
+    <details class="detail-section minor-section">
+      <summary>物品明细</summary>
       <table class="items-table">
         <thead><tr><th>名称</th><th>单位</th><th style="text-align:right">数量</th><th style="text-align:right">单价</th><th style="text-align:right">金额</th><th style="width:32px"></th></tr></thead>
         <tbody>${itemsRows}</tbody>
       </table>
       <div class="items-add-row"><button class="btn small" id="deAddItem">＋ 添加明细行</button></div>
-    </div>
+    </details>
 
-    <div class="detail-section">
-      <h3>报账材料<span class="h3-line"></span></h3>
-      <div class="att-groups">${attachSection}</div>
-      ${compLine}
-    </div>
-
-    <div class="detail-section">
-      <h3>修改记录<span class="h3-line"></span></h3>
+    <details class="detail-section minor-section">
+      <summary>修改记录</summary>
       <div class="history-list">${history}</div>
-    </div>`;
+    </details>`;
 
   function lockedKV(label, field, val, mono, money) {
     const display = money ? fmtMoney(val) : esc(val || '\u2014');
@@ -882,7 +1099,7 @@ async function openEntryDetail(entryId) {
   }
 
   function editRow(label, field, fv, full) {
-    const modified = fv && fv.modified;
+    const modified = field !== 'notes' && fv && fv.modified;
     const val = fv ? fv.current : '';
     if (field === 'notes') {
       return `<div class="form-row"${full ? ' style="grid-column:1/-1"' : ''}>
@@ -895,6 +1112,11 @@ async function openEntryDetail(entryId) {
       <input data-edit="${field}" value="${esc(val)}"/>
     </div>`;
   }
+
+  setupMaterialDrop(body.querySelector('#materialDrop'), entryId, async () => {
+    toast('材料已添加', 'ok');
+    mm.close(); openEntryDetail(entryId); await refreshEntries();
+  });
 
   // ---- editable fields (paid_amount, actual_item_name, notes)
   body.querySelectorAll('[data-edit]').forEach((inp) => {
@@ -1008,6 +1230,48 @@ async function openEntryDetail(entryId) {
   body.querySelectorAll('[data-add-att-type]').forEach((btn) => {
     btn.onclick = () => addAttachmentFlow(entryId, mm, btn.dataset.addAttType);
   });
+  body.querySelectorAll('[data-open-att]').forEach((b) => {
+    b.onclick = async () => {
+      try { await Api.openAttachment(b.dataset.openAtt); }
+      catch (err) { toast(err.message, 'err'); }
+    };
+  });
+  body.querySelectorAll('[data-reveal-att]').forEach((b) => {
+    b.onclick = async () => {
+      try { await Api.revealAttachment(b.dataset.revealAtt); }
+      catch (err) { toast(err.message, 'err'); }
+    };
+  });
+  body.querySelectorAll('[data-replace-att]').forEach((b) => {
+    b.onclick = async () => {
+      const att = atts.find((a) => a.id === b.dataset.replaceAtt);
+      if (!att) return;
+      try {
+        const type = att.type;
+        const res = await Api.pickFiles(false);
+        const path = (res.paths || [])[0];
+        if (!path) return;
+        await Api.updateAttachment(att.id, { src_path: path, type });
+        toast('附件已替换', 'ok');
+        mm.close(); openEntryDetail(entryId); await refreshEntries();
+      } catch (err) { toast(err.message, 'err'); }
+    };
+  });
+  body.querySelectorAll('[data-att-type]').forEach((sel) => {
+    sel.onchange = async () => {
+      try {
+        await Api.updateAttachment(sel.dataset.attType, { type: sel.value });
+        toast('附件类型已更新', 'ok');
+        mm.close(); openEntryDetail(entryId); await refreshEntries();
+      } catch (err) { toast(err.message, 'err'); }
+    };
+  });
+  body.querySelectorAll('[data-att-note]').forEach((inp) => {
+    inp.onchange = async () => {
+      try { await Api.updateAttachment(inp.dataset.attNote, { note: inp.value }); toast('附件备注已保存', 'ok'); }
+      catch (err) { toast(err.message, 'err'); }
+    };
+  });
   body.querySelectorAll('[data-del-att]').forEach((b) => {
     b.onclick = async () => {
       try { await Api.deleteAttachment(b.dataset.delAtt); toast('已删除', 'ok'); mm.close(); openEntryDetail(entryId); await refreshEntries(); }
@@ -1030,23 +1294,67 @@ async function openEntryDetail(entryId) {
   });
 }
 
+const ATTACHMENT_TYPE_OPTS = [
+  ['payment_screenshot', '付款截图'],
+  ['invoice_pdf', '发票 PDF'],
+  ['invoice_xml', '发票 XML'],
+  ['inspection_pdf', '查验单 PDF'],
+  ['other', '其他'],
+];
+
+function classifyAttachmentByName(name) {
+  const n = String(name || '').toLowerCase();
+  if (n.endsWith('.xml')) return 'invoice_xml';
+  if (/\.(jpg|jpeg|png|webp|bmp|gif)$/i.test(n)) return 'payment_screenshot';
+  if (n.endsWith('.pdf') && (name.includes('查验') || name.includes('验真'))) return 'inspection_pdf';
+  if (n.endsWith('.pdf')) return 'invoice_pdf';
+  return 'other';
+}
+
+function dragFilePath(file) {
+  return file.path || file.webkitRelativePath || '';
+}
+
+async function addDroppedMaterialFiles(entryId, files) {
+  if (!files.length) return false;
+  const missingPath = files.filter((f) => !dragFilePath(f));
+  if (missingPath.length) {
+    throw new Error('当前窗口拿不到拖拽文件路径，请用“添加”按钮选择文件');
+  }
+  for (const f of files) {
+    await Api.addAttachment(entryId, dragFilePath(f), classifyAttachmentByName(f.name));
+  }
+  return true;
+}
+
+function setupMaterialDrop(zone, entryId, onDone) {
+  if (!zone) return;
+  zone.ondragover = (ev) => {
+    ev.preventDefault();
+    zone.classList.add('dragging');
+  };
+  zone.ondragleave = () => zone.classList.remove('dragging');
+  zone.ondrop = async (ev) => {
+    ev.preventDefault();
+    zone.classList.remove('dragging');
+    const files = [...(ev.dataTransfer?.files || [])];
+    try {
+      const added = await addDroppedMaterialFiles(entryId, files);
+      if (added) await onDone();
+    } catch (err) { toast(err.message, 'err'); }
+  };
+}
+
 function attachTypeLabel(t) {
   return { invoice_pdf: '发票PDF', invoice_xml: '发票XML', payment_screenshot: '付款截图',
     inspection_pdf: '查验单', other: '其他' }[t] || t;
 }
 async function addAttachmentFlow(entryId, parentModal, presetType) {
   const body = el('div');
-  const opts = [
-    ['payment_screenshot', '付款截图'],
-    ['invoice_pdf', '发票 PDF'],
-    ['invoice_xml', '发票 XML'],
-    ['inspection_pdf', '查验单 PDF'],
-    ['other', '其他'],
-  ];
   body.innerHTML = `
     <div class="form-row"><label>附件类型</label>
       <select id="atType">
-        ${opts.map(([v, l]) => `<option value="${v}"${v === presetType ? ' selected' : ''}>${l}</option>`).join('')}
+        ${ATTACHMENT_TYPE_OPTS.map(([v, l]) => `<option value="${v}"${v === presetType ? ' selected' : ''}>${l}</option>`).join('')}
       </select>
     </div>`;
   const m = modal({
@@ -1075,11 +1383,24 @@ async function exportSummary(ids) {
   try {
     const s = await Api.buildSummary(list);
     const byTitle = Object.entries(s.by_title || {}).map(([t, n]) => `${TITLE_SHORT[t] || t}：${n} 条`).join('　·　');
+    const rows = (s.entries || []).slice(0, 12).map((e, i) => `
+      <tr>
+        <td>${i + 1}</td><td>${esc(e.invoice_no || '未识别')}</td><td>${esc(e.seller || '未识别')}</td>
+        <td class="num">${fmtMoney(e.total)}</td><td>${esc(e.status || '')}</td>
+      </tr>`).join('');
     const m = modal({
       title: '汇总信息',
       wide: true,
-      body: `<div class="hint">共 <b>${s.count}</b> 条，合计 <b style="font-family:var(--font-serif)">${fmtMoney(s.total)}</b>。${byTitle || ''}</div>
-        <pre style="margin-top:12px;background:var(--paper-2);padding:14px;border-radius:9px;overflow:auto;max-height:48vh;font-size:12px;border:1px solid var(--line-soft)">${esc(JSON.stringify(s, null, 2))}</pre>`,
+      body: `<div class="summary-strip">
+          <div><span>条目</span><b>${s.count}</b></div>
+          <div><span>合计</span><b>${fmtMoney(s.total)}</b></div>
+          <div><span>抬头</span><b>${esc(byTitle || '未分组')}</b></div>
+        </div>
+        <table class="items-table summary-table" style="margin-top:14px">
+          <thead><tr><th>#</th><th>发票号</th><th>销售方</th><th style="text-align:right">金额</th><th>状态</th></tr></thead>
+          <tbody>${rows || '<tr><td colspan="5" style="color:var(--ink-soft)">没有可显示的条目</td></tr>'}</tbody>
+        </table>
+        ${(s.entries || []).length > 12 ? '<div class="hint" style="margin-top:10px">这里只预览前 12 条；需要完整表格请使用导出里的“总览 Excel”。</div>' : ''}`,
       footer: [mkBtn('关闭', 'ghost', () => m.close())],
     });
   } catch (e) { toast(e.message, 'err'); }
@@ -1087,12 +1408,71 @@ async function exportSummary(ids) {
 
 async function doExport(ids) {
   if (!ids || !ids.length) { toast('请先选择要导出的条目', 'err'); return; }
-  const name = prompt('绑定包名称：', '报账绑定包-' + new Date().toISOString().slice(0, 10));
-  if (name == null) return;
-  try {
-    const r = await Api.exportBindle(ids, name);
-    toast(`已导出 ${r.count} 条到 ${baseName(r.path)}`, 'ok');
-  } catch (e) { toast(e.message, 'err'); }
+  const body = el('div');
+  const defaultName = '报账导出-' + new Date().toISOString().slice(0, 10);
+  body.innerHTML = `
+    <div class="form-row">
+      <label>导出名称</label>
+      <input id="exName" value="${esc(defaultName)}"/>
+    </div>
+    <div class="export-options">
+      <label class="export-option">
+        <input type="checkbox" data-export="bindle" checked/>
+        <span><b>绑定包</b><small>给别人导入 Tidoc 继续整理，包含条目、附件与签名清单。</small></span>
+      </label>
+      <label class="export-option">
+        <input type="checkbox" data-export="excel" checked/>
+        <span><b>总览 Excel</b><small>给负责人核对条数、金额、材料状态和备注。</small></span>
+      </label>
+      <label class="export-option">
+        <input type="checkbox" data-export="archive" checked/>
+        <span><b>规范命名附件包</b><small>按“序号_发票号_销售方_金额”分文件夹整理附件并压缩。</small></span>
+      </label>
+    </div>
+    <div class="hint" style="margin-top:12px">当前选择 <b>${ids.length}</b> 条。导出的文件会放在设置里的“导出目录”。</div>`;
+  const m = modal({
+    title: '导出',
+    wide: true,
+    body,
+    footer: [
+      mkBtn('取消', 'ghost', () => m.close()),
+      mkBtn('开始导出', 'primary', async () => {
+        const name = body.querySelector('#exName').value.trim() || defaultName;
+        const chosen = [...body.querySelectorAll('[data-export]:checked')].map((x) => x.dataset.export);
+        if (!chosen.length) { toast('请选择至少一种导出内容', 'err'); return; }
+        try {
+          const outputs = [];
+          if (chosen.includes('bindle')) outputs.push(await Api.exportBindle(ids, name + '-绑定包'));
+          if (chosen.includes('excel')) outputs.push(await Api.exportOverviewExcel(ids, name + '-总览'));
+          if (chosen.includes('archive')) outputs.push(await Api.exportAttachmentArchive(ids, name + '-附件'));
+          m.close();
+          showExportResult(outputs);
+          toast(`已导出 ${outputs.length} 个文件`, 'ok');
+        } catch (e) { toast(e.message, 'err'); }
+      }),
+    ],
+  });
+}
+
+function showExportResult(outputs) {
+  const body = el('div');
+  const rows = outputs.map((o) => `
+    <div class="attach-item">
+      <span class="attach-name" title="${esc(o.path)}">${esc(baseName(o.path))}</span>
+      <button class="btn small ghost" data-open-export="${esc(o.path)}">打开</button>
+    </div>`).join('');
+  body.innerHTML = `<div class="hint">已生成以下文件。</div><div class="attach-list" style="margin-top:12px">${rows}</div>`;
+  body.querySelectorAll('[data-open-export]').forEach((btn) => {
+    btn.onclick = async () => {
+      try { await Api.openPath(btn.dataset.openExport); }
+      catch (e) { toast(e.message, 'err'); }
+    };
+  });
+  const m = modal({
+    title: '导出完成',
+    body,
+    footer: [mkBtn('关闭', 'ghost', () => m.close())],
+  });
 }
 
 async function doImport() {

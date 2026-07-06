@@ -58,12 +58,17 @@ const Api = (() => {
     addAttachment: (id, path, type, note) => call('add_attachment', id, path, type, note || ''),
     deleteAttachment: (id) => call('delete_attachment', id),
     setAttachmentNote: (id, note) => call('set_attachment_note', id, note),
+    updateAttachment: (id, fields) => call('update_attachment', id, fields || {}),
+    openAttachment: (id) => call('open_attachment', id),
+    revealAttachment: (id) => call('reveal_attachment', id),
 
     printComponentStatus: () => call('print_component_status'),
     buildPrints: (ids, options, name) => call('build_prints', ids, options || null, name || null),
 
     buildSummary: (ids) => call('build_summary', ids),
     exportBindle: (ids, name) => call('export_bindle', ids, name),
+    exportOverviewExcel: (ids, name) => call('export_overview_excel', ids, name),
+    exportAttachmentArchive: (ids, name) => call('export_attachment_archive', ids, name),
     inspectBindle: (path) => call('inspect_bindle', path),
     importBindle: (path, pid, allowTampered) => call('import_bindle', path, pid, !!allowTampered),
 
@@ -72,5 +77,6 @@ const Api = (() => {
     scanFolder: (folder) => call('scan_folder', folder),
     batchCreateEntries: (profileId, groups, title) => call('batch_create_entries', profileId, groups, title || ''),
     dataRoot: () => call('data_root_path'),
+    openPath: (path) => call('open_path', path),
   };
 })();

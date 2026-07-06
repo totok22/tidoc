@@ -227,7 +227,8 @@ class EntryRepo:
 
     def _modified_fields(self, entry_id: str) -> list[str]:
         rows = self.db.conn.execute(
-            "SELECT field FROM entry_fields WHERE entry_id = ? AND modified = 1", (entry_id,)
+            "SELECT field FROM entry_fields WHERE entry_id = ? AND modified = 1 AND field <> 'notes'",
+            (entry_id,),
         ).fetchall()
         return [r["field"] for r in rows]
 

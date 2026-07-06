@@ -112,3 +112,47 @@ class AttachmentRepo:
         self.db.conn.execute("UPDATE attachments SET note = ? WHERE id = ?", (note, att_id))
         self.db.conn.commit()
         return self.get(att_id)
+
+    def update(self, att_id: str, att_type: str | None = None,
+               src_path: str | Path | None = None, note: str | None = None) -> dict:
+        att = self.get(att_id)
+        if not att:
+            raise FileNotFoundError(f"附件不存在：{att_id}")
+
+        new_type = att_type or att["type"]
+        original_name = att["original_name"]
+        stored_path = att["stored_path"]
+        sha = att["sha256"]
+
+        if src_path:
+            src = Path(src_path)
+            if not src.exists():
+                raise FileNotFoundError(f"文件不存在：{src}")
+            old_abs = Path(att["abs_path"])
+            dest_dir = self.data_root.entry_dir(att["entry_id"])
+            stored_name = self._unique_name(dest_dir, att["entry_id"], new_type, src.suffix)
+            dest = dest_dir / stored_name
+            shutil.copy2(src, dest)
+            if old_abs.exists() and old_abs != dest:
+                old_abs.unlink()
+            original_name = src.name
+            stored_path = f"{att['entry_id']}/{stored_name}"
+            sha = _sha256(dest)
+        elif att_type and att_type != att["type"]:
+            old_abs = Path(att["abs_path"])
+            if old_abs.exists():
+                dest_dir = self.data_root.entry_dir(att["entry_id"])
+                stored_name = self._unique_name(dest_dir, att["entry_id"], new_type, old_abs.suffix)
+                dest = dest_dir / stored_name
+                old_abs.rename(dest)
+                stored_path = f"{att['entry_id']}/{stored_name}"
+
+        self.db.conn.execute(
+            """UPDATE attachments
+               SET type = ?, original_name = ?, stored_path = ?, sha256 = ?,
+                   note = COALESCE(?, note)
+               WHERE id = ?""",
+            (new_type, original_name, stored_path, sha, note, att_id),
+        )
+        self.db.conn.commit()
+        return self.get(att_id)

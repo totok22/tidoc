@@ -7,29 +7,37 @@ SAMPLE_DIR = "/Users/poli/invoice2docx/invoices"
 
 def test_scan_folder_groups_by_prefix():
     r = scan_folder(SAMPLE_DIR)
-    # 样本目录里 26~37、71 每组有 发票/付款截图/查验单 三个文件
+    # 批量导入现在只按发票 PDF 建条目；付款截图/查验单会被跳过，后续手动添加。
     assert r["total_files"] > 0
     assert len(r["groups"]) >= 10
 
-    # 找到 26 组，校验三类齐全且类型判定正确
-    g26 = next((g for g in r["groups"] if g["label"] == "26"), None)
+    g26 = next((g for g in r["groups"] if any(f["name"].startswith("26") for f in g["files"])), None)
     assert g26 is not None
     types = {f["type"] for f in g26["files"]}
     assert "invoice_pdf" in types
-    assert "payment_screenshot" in types
-    assert "inspection_pdf" in types
+    assert "payment_screenshot" not in types
+    assert "inspection_pdf" not in types
 
 
 def test_scan_folder_type_classification():
     r = scan_folder(SAMPLE_DIR)
     for g in r["groups"]:
         for f in g["files"]:
-            if "查验单" in f["name"]:
-                assert f["type"] == "inspection_pdf"
-            elif "付款截图" in f["name"] or f["name"].lower().endswith(".jpg"):
-                assert f["type"] == "payment_screenshot"
-            elif "发票" in f["name"] and f["name"].lower().endswith(".pdf"):
-                assert f["type"] == "invoice_pdf"
+            assert f["type"] in {"invoice_pdf", "invoice_xml"}
+    assert any("付款" in f["name"] or f["name"].lower().endswith(".jpg") for f in r["ignored"])
+
+
+def test_scan_folder_accepts_messy_invoice_pdfs_without_xml(tmp_path):
+    (tmp_path / "微信保存的文件(1).pdf").write_bytes(b"not a real pdf")
+    (tmp_path / "A-77889900.xml").write_text("<bad/>", encoding="utf-8")
+    (tmp_path / "付款截图.png").write_bytes(b"img")
+
+    r = scan_folder(tmp_path)
+    assert r["invoice_pdf_count"] == 1
+    assert len(r["groups"]) == 1
+    assert r["groups"][0]["files"][0]["type"] == "invoice_pdf"
+    assert r["ungrouped"]
+    assert r["ignored"]
 
 
 def test_batch_create_entries(api):
@@ -43,9 +51,9 @@ def test_batch_create_entries(api):
     res = api.batch_create_entries(p["id"], groups)["data"]
     assert res["created"] == 2
     assert not res["failed"]
-    # 每条应带上三类附件
+    # 批量只导发票材料；付款截图 / 查验单之后在详情页手动补。
     for eid in res["entry_ids"]:
         e = api.get_entry(eid)["data"]
         assert e["has_invoice"]
-        assert e["has_payment"]
-        assert e["has_inspection"]
+        assert not e["has_payment"]
+        assert not e["has_inspection"]
