@@ -39,7 +39,8 @@ jobs:
       - name: Build Windows core
         run: >
           pyinstaller --noconfirm --clean --onefile --windowed
-          --name Tidoc
+          --name tidoc
+          --icon "tidoc/web/assets/tidoc-logo.icns"
           --add-data "tidoc/web;tidoc/web"
           scripts/tidoc_app_entry.py
 
@@ -57,7 +58,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p release
-          cp dist/Tidoc.exe "release/tidoc-core-windows-v${VERSION}.exe"
+          cp dist/tidoc.exe "release/tidoc-core-windows-v${VERSION}.exe"
           cp dist/tidoc_print.exe "release/tidoc-print-windows-v${VERSION}.exe"
 
       - uses: actions/upload-artifact@v4
@@ -91,15 +92,16 @@ jobs:
       - name: Build macOS core app
         run: >
           pyinstaller --noconfirm --clean --onedir --windowed
-          --name "理票"
+          --name "tidoc"
+          --icon "tidoc/web/assets/tidoc-logo.icns"
           --add-data "tidoc/web:tidoc/web"
           scripts/tidoc_app_entry.py
 
       - name: Create DMG
         run: |
           mkdir -p release
-          hdiutil create -volname "理票" \
-            -srcfolder "dist/理票.app" \
+          hdiutil create -volname "tidoc" \
+            -srcfolder "dist/tidoc.app" \
             -ov -format UDZO "release/tidoc-core-macos-v${VERSION}.dmg"
 
       - name: Install print dependencies

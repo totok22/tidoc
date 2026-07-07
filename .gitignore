@@ -9,6 +9,7 @@ env/
 # 打包产物
 build/
 dist/
+release-local/
 *.spec
 
 # 应用数据 / 附件仓库 / 导出
