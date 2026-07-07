@@ -4,7 +4,9 @@
 ├─ tidoc.sqlite            结构化数据
 ├─ attachments/<entry_id>/ 附件文件仓库
 ├─ exports/                导出的绑定包 / 汇总 / 打印件
-└─ dropped/                拖拽文件临时中转区
+├─ dropped/                拖拽文件临时中转区
+├─ components/             联网下载的可选组件
+└─ updates/                核心更新包下载与备份
 """
 
 from __future__ import annotations
@@ -13,7 +15,7 @@ import os
 import sys
 from pathlib import Path
 
-APP_DIR_NAME = "Tidoc"
+APP_DIR_NAME = "tidoc"
 
 
 def default_data_root() -> Path:
@@ -24,7 +26,11 @@ def default_data_root() -> Path:
         base = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming"))
     else:
         base = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share"))
-    return base / APP_DIR_NAME
+    target = base / APP_DIR_NAME
+    legacy = base / APP_DIR_NAME.capitalize()
+    if legacy.exists() and not target.exists():
+        return legacy
+    return target
 
 
 class DataRoot:
@@ -36,6 +42,8 @@ class DataRoot:
         self.attachments_dir.mkdir(parents=True, exist_ok=True)
         self.exports_dir.mkdir(parents=True, exist_ok=True)
         self.dropped_dir.mkdir(parents=True, exist_ok=True)
+        self.components_dir.mkdir(parents=True, exist_ok=True)
+        self.updates_dir.mkdir(parents=True, exist_ok=True)
 
     @property
     def db_path(self) -> Path:
@@ -52,6 +60,14 @@ class DataRoot:
     @property
     def dropped_dir(self) -> Path:
         return self.root / "dropped"
+
+    @property
+    def components_dir(self) -> Path:
+        return self.root / "components"
+
+    @property
+    def updates_dir(self) -> Path:
+        return self.root / "updates"
 
     def entry_dir(self, entry_id: str) -> Path:
         """某个条目的附件目录，按需创建。"""

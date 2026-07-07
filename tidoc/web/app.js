@@ -1,4 +1,4 @@
-/* 理票 · Tidoc 前端主逻辑 — 整理 / 筛选 / 便捷操作。 */
+/* tidoc 前端主逻辑 — 整理 / 筛选 / 便捷操作。 */
 
 const State = {
   profiles: [],
@@ -695,39 +695,77 @@ async function openSettings() {
     printStatus = await Api.printComponentStatus();
   } catch (e) { toast(e.message, 'err'); return; }
   const body = el('div');
+  const settingsIcons = {
+    profile: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M5 21a7 7 0 0 1 14 0"/></svg>',
+    batch: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7h6l2 2h10v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V7z"/><path d="M12 12v5m0-5-2 2m2-2 2 2"/></svg>',
+    bindle: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M7 3h7l4 4v14H7z"/><path d="M14 3v5h4"/><path d="M11 12v5m0 0-2-2m2 2 2-2"/></svg>',
+    update: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12a8 8 0 0 0-14-5"/><path d="M4 7h5V2"/><path d="M4 12a8 8 0 0 0 14 5"/><path d="M20 17h-5v5"/></svg>',
+    guide: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M5 4h14v16H5z"/><path d="M8 8h8M8 12h8M8 16h5"/></svg>',
+    folder: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7h6l2 2h10v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1z"/></svg>',
+  };
+  const action = (id, icon, title, meta) => `
+    <button class="settings-action" ${id ? `id="${id}"` : ''}>
+      <span class="settings-action-icon">${settingsIcons[icon]}</span>
+      <span class="settings-action-copy"><b>${esc(title)}</b><span>${esc(meta)}</span></span>
+    </button>`;
+  const pathAction = (path, icon, title, meta) => `
+    <button class="settings-action" data-open-path="${esc(path)}">
+      <span class="settings-action-icon">${settingsIcons[icon]}</span>
+      <span class="settings-action-copy"><b>${esc(title)}</b><span>${esc(meta)}</span></span>
+    </button>`;
   const pathRow = (label, path) => `
     <div class="settings-path">
       <b>${esc(label)}</b>
       <code title="${esc(path)}">${esc(path)}</code>
       <button class="btn small ghost" data-open-path="${esc(path)}">打开</button>
     </div>`;
-  const printLine = printStatus.available
+  const printBadge = printStatus.available
     ? '<span class="settings-ok">已可用</span>'
-    : `<span class="settings-warn">未安装${printStatus.missing?.length ? '：' + esc(printStatus.missing.join('、')) : ''}</span>`;
+    : '<span class="settings-warn">未安装</span>';
+  const printDetail = printStatus.available
+    ? '打印材料导出'
+    : (printStatus.missing?.length ? esc(printStatus.missing.join('、')) : '可选组件');
   body.innerHTML = `
-    <div class="detail-section">
-      <h3>常用操作<span class="h3-line"></span></h3>
-      <div class="settings-actions">
-        <button class="settings-action" id="settingsProfiles"><b>身份信息</b><span>姓名、审核人、学号和银行卡</span></button>
-        <button class="settings-action" id="settingsBatchImport"><b>批量导入</b><span>从文件夹或多选文件导入发票</span></button>
-        <button class="settings-action" id="settingsImportBindle"><b>导入绑定包</b><span>接收别人整理的 .tidoc</span></button>
-        <button class="settings-action" id="settingsUsage"><b>使用提示</b><span>导入、拖拽和材料绑定</span></button>
-        <button class="settings-action" data-open-path="${esc(paths.exports)}"><b>导出目录</b><span>查看已生成文件</span></button>
+    <div class="settings-shell">
+      <div class="settings-hero">
+        <img src="assets/tidoc-logo-128.png" alt="" />
+        <div>
+          <b>tidoc</b>
+          <span>本机数据：<code>${esc(paths.root)}</code></span>
+        </div>
       </div>
-    </div>
-    <div class="detail-section">
-      <h3>功能状态<span class="h3-line"></span></h3>
-      <div class="settings-status-row">
-        <b>打印导出</b>
-        <span>${printLine}</span>
+      <div class="detail-section">
+        <h3>账户与导入<span class="h3-line"></span></h3>
+        <div class="settings-actions">
+          ${action('settingsProfiles', 'profile', '身份信息', '姓名 / 审核人 / 银行卡')}
+          ${action('settingsBatchImport', 'batch', '批量导入', '文件夹 / 多文件')}
+          ${action('settingsImportBindle', 'bindle', '导入绑定包', '.tidoc')}
+          ${action('settingsUsage', 'guide', '使用提示', '导入 / 拖拽 / 绑定')}
+        </div>
       </div>
-    </div>
-    <div class="detail-section">
-      <h3>本机数据<span class="h3-line"></span></h3>
-      ${pathRow('数据目录', paths.root)}
-      ${pathRow('附件仓库', paths.attachments)}
-      ${pathRow('导出目录', paths.exports)}
-      ${pathRow('数据库', paths.db)}
+      <div class="detail-section">
+        <h3>输出与维护<span class="h3-line"></span></h3>
+        <div class="settings-actions compact">
+          ${action('settingsUpdate', 'update', '软件更新', '核心 / 打印组件')}
+          ${pathAction(paths.exports, 'folder', '导出目录', 'Excel / 附件包 / 打印材料')}
+        </div>
+        <div class="settings-status-card">
+          <span class="settings-status-label">打印导出</span>
+          <b>${printBadge}</b>
+          <span>${printDetail}</span>
+        </div>
+      </div>
+      <div class="detail-section">
+        <h3>本机数据<span class="h3-line"></span></h3>
+        <div class="settings-paths">
+          ${pathRow('数据目录', paths.root)}
+          ${pathRow('附件仓库', paths.attachments)}
+          ${pathRow('导出目录', paths.exports)}
+          ${pathRow('组件目录', paths.components)}
+          ${pathRow('更新目录', paths.updates)}
+          ${pathRow('数据库', paths.db)}
+        </div>
+      </div>
     </div>`;
   body.querySelectorAll('[data-open-path]').forEach((btn) => {
     btn.onclick = async () => {
@@ -747,6 +785,10 @@ async function openSettings() {
     m.close();
     doImport();
   };
+  body.querySelector('#settingsUpdate').onclick = () => {
+    m.close();
+    openUpdateDialog();
+  };
   body.querySelector('#settingsUsage').onclick = () => {
     m.close();
     openUsageGuide(false);
@@ -754,8 +796,66 @@ async function openSettings() {
   const m = modal({
     title: '设置',
     body,
+    wide: true,
     footer: [mkBtn('关闭', 'ghost', () => m.close())],
   });
+}
+
+async function openUpdateDialog() {
+  const body = el('div', '', '<div class="hint">正在读取更新清单...</div>');
+  const m = modal({
+    title: '软件更新',
+    body,
+    footer: [mkBtn('关闭', 'ghost', () => m.close())],
+  });
+  try {
+    const status = await Api.checkUpdates();
+    const rows = (status.updates || []).map((u) => {
+      const available = u.available;
+      const action = u.component === 'print'
+        ? `<button class="btn small${available ? '' : ' ghost'}" data-install-print ${available ? '' : 'disabled'}>安装</button>`
+        : `<button class="btn small${available ? '' : ' ghost'}" data-download-core ${available ? '' : 'disabled'}>下载</button>`;
+      return `<div class="settings-status-row">
+        <b>${esc(u.name || u.component)}</b>
+        <span>${esc(u.current_version || '未安装')} → ${esc(u.latest_version || '未知')} ${available ? '<span class="settings-warn">有更新</span>' : '<span class="settings-ok">已是最新</span>'} ${action}</span>
+      </div>`;
+    }).join('');
+    body.innerHTML = `
+      <div class="detail-section">
+        <h3>更新源<span class="h3-line"></span></h3>
+        <div class="hint"><code>${esc(status.manifest_url)}</code></div>
+      </div>
+      <div class="detail-section">
+        <h3>当前平台<span class="h3-line"></span></h3>
+        <div class="hint">${esc(status.platform)}</div>
+      </div>
+      <div class="detail-section">
+        <h3>可用版本<span class="h3-line"></span></h3>
+        ${rows || '<div class="hint warn">清单里没有当前平台的更新包。</div>'}
+      </div>`;
+    const coreBtn = body.querySelector('[data-download-core]');
+    if (coreBtn) coreBtn.onclick = async () => {
+      coreBtn.disabled = true;
+      coreBtn.textContent = '下载中';
+      try {
+        const r = await Api.downloadCoreUpdate();
+        toast('核心更新包已下载：' + baseName(r.file_path), 'ok');
+      } catch (e) { toast(e.message, 'err'); }
+      finally { coreBtn.textContent = '下载'; coreBtn.disabled = false; }
+    };
+    const printBtn = body.querySelector('[data-install-print]');
+    if (printBtn) printBtn.onclick = async () => {
+      printBtn.disabled = true;
+      printBtn.textContent = '安装中';
+      try {
+        const r = await Api.installPrintComponent();
+        toast('打印组件已安装：' + r.version, 'ok');
+      } catch (e) { toast(e.message, 'err'); }
+      finally { printBtn.textContent = '安装'; printBtn.disabled = false; }
+    };
+  } catch (e) {
+    body.innerHTML = `<div class="hint warn">${esc(e.message)}</div>`;
+  }
 }
 
 function maybeShowFirstUseGuide() {
@@ -1754,7 +1854,7 @@ async function doExport(ids) {
     <div class="export-options">
       <label class="export-option">
         <input type="checkbox" data-export="bindle" checked/>
-        <span><b>绑定包</b><small>给别人导入 Tidoc 继续整理，包含条目、附件与签名清单。</small></span>
+        <span><b>绑定包</b><small>给别人导入 tidoc 继续整理，包含条目、附件与签名清单。</small></span>
       </label>
       <label class="export-option">
         <input type="checkbox" data-export="excel" checked/>

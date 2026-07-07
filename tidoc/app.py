@@ -1,4 +1,4 @@
-"""理票 · Tidoc 应用入口。
+"""tidoc 应用入口。
 
 双击即进主界面：PyWebView 原生窗口加载 web/index.html，后端 API 通过
 window.pywebview.api 暴露给前端。不开本地 HTTP 端口（设计文档第 2、4 节）。
@@ -55,7 +55,7 @@ def main() -> None:
     api = Api()
     index = WEB_DIR / "index.html"
     window = webview.create_window(
-        "理票 · Tidoc",
+        "tidoc",
         url=str(index),
         js_api=api,
         width=1160,

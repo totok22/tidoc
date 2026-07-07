@@ -143,7 +143,7 @@ def export_attachment_zip(entries_repo: EntryRepo, attachments_root: str | Path,
     out = Path(out_path)
     out.parent.mkdir(parents=True, exist_ok=True)
     root = Path(attachments_root)
-    manifest: list[str] = ["Tidoc 附件整理包", "", "命名规则：序号_发票号_销售方_金额/附件类型_序号.扩展名", ""]
+    manifest: list[str] = ["tidoc 附件整理包", "", "命名规则：序号_发票号_销售方_金额/附件类型_序号.扩展名", ""]
     with zipfile.ZipFile(out, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         for idx, eid in enumerate(entry_ids, start=1):
             entry = entries_repo.get(eid)

@@ -343,7 +343,7 @@ class Api:
     @_guard
     def print_component_status(self):
         from .services.printing import component_status
-        return component_status()
+        return component_status(self.data_root.components_dir)
 
     @_guard
     def build_prints(self, entry_ids, options=None, out_name=None):
@@ -353,7 +353,29 @@ class Api:
         name = out_name or "打印件"
         out_dir = self.data_root.exports_dir / name
         return _build(self.entries, self.profiles, self.data_root.attachments_dir,
-                      entry_ids, out_dir, options)
+                      entry_ids, out_dir, options, self.data_root.components_dir)
+
+    # ------------------------------------------------------------ 联网更新（腾讯云 COS）
+    @_guard
+    def check_updates(self):
+        from .services.updater import check_updates
+        return check_updates(self.data_root.components_dir)
+
+    @_guard
+    def download_core_update(self):
+        from .services.updater import COMPONENT_CORE, download_update, load_manifest
+        manifest = load_manifest()
+        result = download_update(manifest, COMPONENT_CORE, self.data_root.updates_dir)
+        return result.to_dict()
+
+    @_guard
+    def install_print_component(self):
+        from .services.updater import install_print_component, load_manifest
+        manifest = load_manifest()
+        result = install_print_component(
+            manifest, self.data_root.components_dir, self.data_root.updates_dir
+        )
+        return result.to_dict()
 
     # ------------------------------------------------------------ 文件对话框
     @_guard
@@ -382,6 +404,8 @@ class Api:
             "attachments": str(self.data_root.attachments_dir),
             "exports": str(self.data_root.exports_dir),
             "db": str(self.data_root.db_path),
+            "components": str(self.data_root.components_dir),
+            "updates": str(self.data_root.updates_dir),
         }
 
     @_guard

@@ -64,6 +64,9 @@ const Api = (() => {
 
     printComponentStatus: () => call('print_component_status'),
     buildPrints: (ids, options, name) => call('build_prints', ids, options || null, name || null),
+    checkUpdates: () => call('check_updates'),
+    downloadCoreUpdate: () => call('download_core_update'),
+    installPrintComponent: () => call('install_print_component'),
 
     buildSummary: (ids) => call('build_summary', ids),
     exportBindle: (ids, name) => call('export_bindle', ids, name),

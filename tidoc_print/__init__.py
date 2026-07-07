@@ -1,4 +1,4 @@
-"""理票 · Tidoc 打印导出组件（可选安装）。
+"""tidoc 打印导出组件（可选安装）。
 
 重依赖（python-docx / pypdf / Pillow / reportlab）都在这个包里，核心不 import 它。
 核心通过 is_available() 探测组件是否已安装，未装则相关入口置灰。

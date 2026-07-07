@@ -1,4 +1,4 @@
-# 理票 · Tidoc
+# tidoc
 
 报账凭证管理与整理工具。Mac / Windows 通用桌面程序。
 
@@ -66,4 +66,4 @@ tidoc_print/      打印导出组件（可选安装，重依赖 docx/pypdf/Pillo
 打印导出组件（可选安装、按抬头强隔离、跨人合并、页面信息标注）。
 
 待做（阶段 9–10）：OCR 识别组件（可选安装，用户自填阿里云 Key，四档触发）、
-COS 联网更新、打包（Mac/Win）与体积优化。
+打包（Mac/Win）与体积优化；COS 联网更新发布链路已接入，详见 [docs/UPDATE.md](docs/UPDATE.md)。
