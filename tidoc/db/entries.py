@@ -168,6 +168,29 @@ class EntryRepo:
             where.append("e.invoice_date <= ?"); params.append(filters["date_to"])
         if filters.get("modified_only"):
             where.append("EXISTS (SELECT 1 FROM entry_fields ef WHERE ef.entry_id = e.id AND ef.modified = 1)")
+        # 备注维度：有备注 / 无备注（记账备注即 entry_fields.notes 有非空当前值）
+        has_notes = filters.get("has_notes")
+        if has_notes is True or has_notes == "yes":
+            where.append("EXISTS (SELECT 1 FROM entry_fields ef WHERE ef.entry_id = e.id AND ef.field='notes' AND TRIM(ef.current) <> '')")
+        elif has_notes is False or has_notes == "no":
+            where.append("NOT EXISTS (SELECT 1 FROM entry_fields ef WHERE ef.entry_id = e.id AND ef.field='notes' AND TRIM(ef.current) <> '')")
+        # 标签维度：命中任一标签即可（tags 以 JSON 数组字符串存，用 LIKE 粗匹配带引号的标签值）
+        tags = filters.get("tags")
+        if isinstance(tags, str):
+            tags = [tags]
+        if tags:
+            tag_clauses = []
+            for t in tags:
+                tag_clauses.append("e.tags LIKE ?")
+                params.append(f'%"{t}"%')
+            where.append("(" + " OR ".join(tag_clauses) + ")")
+        # 批次维度：属于 / 不属于某批次
+        if filters.get("batch_id"):
+            where.append("EXISTS (SELECT 1 FROM batch_entries be WHERE be.entry_id = e.id AND be.batch_id = ?)")
+            params.append(filters["batch_id"])
+        if filters.get("not_in_batch_id"):
+            where.append("NOT EXISTS (SELECT 1 FROM batch_entries be WHERE be.entry_id = e.id AND be.batch_id = ?)")
+            params.append(filters["not_in_batch_id"])
 
         sql = "SELECT e.* FROM entries e"
         if where:
@@ -366,6 +389,58 @@ class EntryRepo:
             )
         self._touch(entry_id)
         self.db.conn.commit()
+
+    def add_tag(self, entry_ids: list[str], tag: str) -> int:
+        """给一批条目追加同一个标签（已有则跳过）。返回实际改动条数。"""
+        tag = (tag or "").strip()
+        if not tag:
+            raise ValueError("标签不能为空。")
+        changed = 0
+        for eid in (entry_ids or []):
+            row = self.db.conn.execute("SELECT tags FROM entries WHERE id = ?", (eid,)).fetchone()
+            if not row:
+                continue
+            tags = json.loads(row["tags"] or "[]")
+            if tag in tags:
+                continue
+            tags.append(tag)
+            self.db.conn.execute(
+                "UPDATE entries SET tags = ? WHERE id = ?", (json.dumps(tags, ensure_ascii=False), eid)
+            )
+            self._touch(eid)
+            changed += 1
+        self.db.conn.commit()
+        return changed
+
+    def remove_tag(self, entry_ids: list[str], tag: str) -> int:
+        """从一批条目移除某标签。返回实际改动条数。"""
+        tag = (tag or "").strip()
+        changed = 0
+        for eid in (entry_ids or []):
+            row = self.db.conn.execute("SELECT tags FROM entries WHERE id = ?", (eid,)).fetchone()
+            if not row:
+                continue
+            tags = json.loads(row["tags"] or "[]")
+            if tag not in tags:
+                continue
+            tags = [t for t in tags if t != tag]
+            self.db.conn.execute(
+                "UPDATE entries SET tags = ? WHERE id = ?", (json.dumps(tags, ensure_ascii=False), eid)
+            )
+            self._touch(eid)
+            changed += 1
+        self.db.conn.commit()
+        return changed
+
+    def all_tags(self) -> list[str]:
+        """当前库里用过的全部标签（去重、按字母序），供筛选下拉与自动补全。"""
+        rows = self.db.conn.execute("SELECT tags FROM entries WHERE tags <> '' AND tags <> '[]'").fetchall()
+        seen: set[str] = set()
+        for r in rows:
+            for t in json.loads(r["tags"] or "[]"):
+                if t:
+                    seen.add(t)
+        return sorted(seen)
 
     def _touch(self, entry_id: str) -> None:
         self.db.conn.execute("UPDATE entries SET updated_at = ? WHERE id = ?", (_now(), entry_id))

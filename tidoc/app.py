@@ -52,7 +52,8 @@ def _install_native_stderr_filter() -> None:
 
 def main() -> None:
     _install_native_stderr_filter()
-    api = Api()
+    from .db.paths import resolve_data_root
+    api = Api(resolve_data_root())
     index = WEB_DIR / "index.html"
     window = webview.create_window(
         "tidoc",

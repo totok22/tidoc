@@ -8,7 +8,15 @@ const State = {
   quickView: 'all',
   entries: [],
   selected: new Set(),
+  lastSelectedId: null,
+  suppressListAnimation: false,
   density: 'comfortable',
+  groupBy: 'none',       // 'none' | 'profile' | 'title' —— 列表分组浏览
+  tagFilter: '',         // 高级筛选：按标签
+  notesFilter: '',       // 高级筛选：'' | 'yes' | 'no'（有 / 无记账备注）
+  batchFilter: '',       // 当前聚焦的批次 id（在批次内浏览 / 管理）
+  batches: [],           // 批次列表缓存
+  allTags: [],           // 全库用过的标签
 };
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -79,11 +87,38 @@ function wrapSvg(svg, s) {
 
 // ------------------------------------------------------------------ 初始化
 async function init() {
+  applyPreferences();
   bindEvents();
   await loadProfiles();
+  await loadBatches();
   await refreshEntries();
+  await refreshTagOptions();
   showSearchHintIfEmpty();
   maybeShowFirstUseGuide();
+}
+
+// 启动时套用用户在设置里选的默认抬头 / 密度
+function applyPreferences() {
+  const dt = localStorage.getItem('tidoc.defaultTitle') || '';
+  if (dt) {
+    State.activeTitle = dt;
+    const titleSel = $('#filterTitle');
+    if (titleSel) titleSel.value = dt;
+  }
+  const dd = localStorage.getItem('tidoc.defaultDensity');
+  if (dd) {
+    State.density = dd;
+    $$('.density-btn').forEach((b) => b.classList.toggle('active', b.dataset.density === dd));
+  }
+}
+
+async function refreshTagOptions() {
+  try { State.allTags = await Api.listTags(); } catch (e) { State.allTags = []; }
+  const sel = $('#filterTag');
+  if (!sel) return;
+  const cur = State.tagFilter;
+  sel.innerHTML = '<option value="">全部</option>' +
+    State.allTags.map((t) => `<option value="${esc(t)}"${t === cur ? ' selected' : ''}>${esc(t)}</option>`).join('');
 }
 
 async function loadProfiles() {
@@ -124,16 +159,18 @@ function renderProfileSelects() {
 
 // ------------------------------------------------------------------ 筛选
 function currentFilters() {
+  const val = (id) => $('#' + id)?.value || '';
+  State.activeTitle = val('filterTitle');
   const f = { title: State.activeTitle || undefined };
-  const status = $('#filterStatus').value;
-  const check = $('#filterCheck').value;
-  const profile = $('#filterProfile').value;
-  const kw = $('#filterKeyword').value.trim();
-  const amin = $('#filterAmountMin').value;
-  const amax = $('#filterAmountMax').value;
-  const dfrom = $('#filterDateFrom').value;
-  const dto = $('#filterDateTo').value;
-  const sort = $('#sortSelect').value;
+  const status = val('filterStatus');
+  const check = val('filterCheck');
+  const profile = val('filterProfile');
+  const kw = val('filterKeyword').trim();
+  const amin = val('filterAmountMin');
+  const amax = val('filterAmountMax');
+  const dfrom = val('filterDateFrom');
+  const dto = val('filterDateTo');
+  const sort = val('sortSelect');
 
   if (State.quickView === 'warning') f.check_status = 'warning';
   else if (State.quickView === 'modified') f.modified_only = true;
@@ -148,6 +185,9 @@ function currentFilters() {
   if (dfrom) f.date_from = dfrom;
   if (dto) f.date_to = dto;
   if (sort) f.sort = sort;
+  if (State.tagFilter) f.tags = [State.tagFilter];
+  if (State.notesFilter) f.has_notes = State.notesFilter;
+  if (State.batchFilter) f.batch_id = State.batchFilter;
   return f;
 }
 
@@ -163,12 +203,14 @@ async function refreshEntries() {
   }
   renderEntries();
   renderActiveFilters();
+  renderBatchContext();
 }
 
 // ------------------------------------------------------------------ 渲染列表
 function renderEntries() {
   const list = $('#entryList');
   list.dataset.density = State.density;
+  list.classList.toggle('no-anim', State.suppressListAnimation);
   list.innerHTML = '';
   const empty = $('#emptyState');
   const emptyAll = State.entries.length === 0;
@@ -179,8 +221,13 @@ function renderEntries() {
     const fp = e.fields && e.fields.paid_amount ? Number(e.fields.paid_amount.current) : 0;
     paidSum += isNaN(fp) ? 0 : fp;
     if (e.modified_fields && e.modified_fields.length) modifiedCount++;
-    list.appendChild(entryCard(e));
   });
+
+  if (State.groupBy !== 'none' && !emptyAll) {
+    renderGroupedEntries(list);
+  } else {
+    State.entries.forEach((e) => list.appendChild(entryCard(e)));
+  }
 
   $('#stats').innerHTML = emptyAll
     ? ''
@@ -193,12 +240,13 @@ function renderEntries() {
   empty.hidden = !emptyAll;
   if (emptyAll) renderEmptyState();
   const hasSelection = State.selected.size > 0;
-  $('#selectionBar').classList.toggle('empty', !hasSelection);
+  $('#selectionBar').classList.toggle('hidden', !hasSelection);
   $('#selCount').textContent = hasSelection ? `已选 ${State.selected.size}` : '未选择';
-  ['clearSelBtn', 'batchSummaryBtn', 'batchExportBtn', 'batchPrintBtn', 'batchDeleteBtn'].forEach((id) => {
+  ['clearSelBtn', 'addToBatchBtn', 'tagBtn', 'batchSummaryBtn', 'batchExportBtn', 'batchPrintBtn', 'batchDeleteBtn'].forEach((id) => {
     const btn = $('#' + id);
     if (btn) btn.disabled = !hasSelection;
   });
+  State.suppressListAnimation = false;
 }
 
 function entryCard(e) {
@@ -207,12 +255,16 @@ function entryCard(e) {
     (State.selected.has(e.id) ? ' selected' : ''));
 
   const check = el('div', 'entry-check');
+  check.title = '切换选中';
+  check.onclick = (ev) => { ev.stopPropagation(); toggleSelect(e.id, ev.shiftKey); };
   const cb = el('input');
   cb.type = 'checkbox'; cb.checked = State.selected.has(e.id);
-  cb.onclick = (ev) => { ev.stopPropagation(); toggleSelect(e.id); };
+  cb.onclick = (ev) => { ev.stopPropagation(); toggleSelect(e.id, ev.shiftKey); };
   check.appendChild(cb);
 
   const stripe = el('div', 'entry-stripe');
+  stripe.title = '切换选中';
+  stripe.onclick = (ev) => { ev.stopPropagation(); toggleSelect(e.id, ev.shiftKey); };
 
   const modified = (e.modified_fields && e.modified_fields.length)
     ? `<span class="badge modified" title="有 ${e.modified_fields.length} 个字段被人工修改">${iconPencil(11)}已改 ${e.modified_fields.length}</span>` : '';
@@ -256,6 +308,11 @@ function entryCard(e) {
     </div>`);
   if (notesCur || actualCur) {
     main.insertAdjacentHTML('beforeend', `<div class="entry-note-line">${notesPreview}</div>`);
+  }
+  const tags = Array.isArray(e.tags) ? e.tags : [];
+  if (tags.length) {
+    main.insertAdjacentHTML('beforeend',
+      `<div class="entry-tags">${tags.map((t) => `<span class="entry-tag">${esc(t)}</span>`).join('')}</div>`);
   }
 
   const right = el('div', 'entry-right');
@@ -312,6 +369,39 @@ function entryCard(e) {
   return card;
 }
 
+// 按报账人 / 抬头分组渲染，每组头显示条数、合计、齐备率，可整组选中
+function renderGroupedEntries(list) {
+  const keyOf = (e) => State.groupBy === 'profile'
+    ? (State.profileById[e.profile_id]?.name || '未知报账人')
+    : (e.title || '未标注抬头');
+  const groups = new Map();
+  State.entries.forEach((e) => {
+    const k = keyOf(e);
+    if (!groups.has(k)) groups.set(k, []);
+    groups.get(k).push(e);
+  });
+
+  [...groups.entries()].forEach(([name, items]) => {
+    const total = items.reduce((s, e) => s + (Number(e.total) || 0), 0);
+    const ready = items.filter((e) => (e.completeness?.ready)).length;
+    const allSel = items.every((e) => State.selected.has(e.id));
+    const tcls = State.groupBy === 'title' ? (TITLE_CLASS[name] || '') : '';
+
+    const head = el('div', 'group-head' + (tcls ? ' title-' + tcls : ''));
+    head.innerHTML = `
+      <button class="group-sel" title="选中/取消这组">${allSel ? '✓' : ''}</button>
+      <span class="group-name">${esc(name)}</span>
+      <span class="group-meta"><b>${items.length}</b> 条 · 合计 <b>${fmtMoney(total)}</b> · 齐备 ${ready}/${items.length}</span>`;
+    head.querySelector('.group-sel').onclick = () => {
+      if (allSel) items.forEach((e) => State.selected.delete(e.id));
+      else items.forEach((e) => State.selected.add(e.id));
+      renderEntries();
+    };
+    list.appendChild(head);
+    items.forEach((e) => list.appendChild(entryCard(e)));
+  });
+}
+
 function renderEmptyState() {
   const hasFilter = hasAnyFilter();
   const illus = $('#emptyIllus');
@@ -336,16 +426,20 @@ function renderActiveFilters() {
   const mkChip = (label, onClear) => {
     const c = el('span', 'filter-chip', `<span>${esc(label)}</span>`);
     const x = el('button', null, '×');
-    x.onclick = onClear; c.appendChild(x);
+    x.onclick = () => { State.selected.clear(); onClear(); }; c.appendChild(x);
     chips.push(c);
   };
   if (State.quickView !== 'all') mkChip('视图：' + quickViewLabel(State.quickView), () => { setQuickView('all'); });
-  if ($('#filterStatus').value) mkChip('状态：' + STATUS_LABEL[$('#filterStatus').value], () => { $('#filterStatus').value = ''; refreshEntries(); });
+  if (State.activeTitle) mkChip('抬头：' + (TITLE_SHORT[State.activeTitle] || State.activeTitle), () => { State.activeTitle = ''; $('#filterTitle').value = ''; refreshEntries(); });
+  if ($('#filterStatus')?.value) mkChip('状态：' + STATUS_LABEL[$('#filterStatus').value], () => { $('#filterStatus').value = ''; refreshEntries(); });
   if ($('#filterCheck').value) mkChip('校验：' + CHECK_LABEL[$('#filterCheck').value], () => { $('#filterCheck').value = ''; refreshEntries(); });
   if ($('#filterProfile').value) mkChip('报账人：' + (State.profileById[$('#filterProfile').value]?.name || ''), () => { $('#filterProfile').value = ''; refreshEntries(); });
+  if (State.batchFilter) mkChip('批次：' + (State.batches.find((b) => b.id === State.batchFilter)?.name || ''), () => { State.batchFilter = ''; $('#filterBatch').value = ''; refreshEntries(); });
   if ($('#filterKeyword').value) mkChip('搜索：' + $('#filterKeyword').value, () => { $('#filterKeyword').value = ''; refreshEntries(); });
   if ($('#filterAmountMin').value || $('#filterAmountMax').value) mkChip(`金额 ${$('#filterAmountMin').value || '∞'}–${$('#filterAmountMax').value || '∞'}`, () => { $('#filterAmountMin').value = ''; $('#filterAmountMax').value = ''; refreshEntries(); });
   if ($('#filterDateFrom').value || $('#filterDateTo').value) mkChip(`日期 ${$('#filterDateFrom').value || '…'}–${$('#filterDateTo').value || '…'}`, () => { $('#filterDateFrom').value = ''; $('#filterDateTo').value = ''; refreshEntries(); });
+  if (State.tagFilter) mkChip('标签：' + State.tagFilter, () => { State.tagFilter = ''; $('#filterTag').value = ''; refreshEntries(); });
+  if (State.notesFilter) mkChip('备注：' + (State.notesFilter === 'yes' ? '有' : '无'), () => { State.notesFilter = ''; $('#filterNotes').value = ''; refreshEntries(); });
 
   wrap.innerHTML = '';
   if (!chips.length) {
@@ -359,10 +453,11 @@ function renderActiveFilters() {
 }
 
 function hasAnyFilter() {
-  return !!($('#filterStatus').value || $('#filterCheck').value || $('#filterProfile').value ||
+  return !!(($('#filterStatus')?.value || '') || $('#filterCheck').value || $('#filterProfile').value || $('#filterTitle').value ||
     $('#filterKeyword').value || $('#filterAmountMin').value || $('#filterAmountMax').value ||
     $('#filterDateFrom').value || $('#filterDateTo').value ||
-    State.activeTitle || State.quickView !== 'all');
+    State.tagFilter || State.notesFilter || State.batchFilter ||
+    State.quickView !== 'all');
 }
 
 function quickViewLabel(v) {
@@ -386,19 +481,306 @@ function showSearchHintIfEmpty() {
 }
 
 // ------------------------------------------------------------------ 选择 / 批量
-function toggleSelect(id) {
+function toggleSelect(id, range) {
+  State.suppressListAnimation = true;
+  if (range && State.lastSelectedId) {
+    const ids = State.entries.map((e) => e.id);
+    const a = ids.indexOf(State.lastSelectedId);
+    const b = ids.indexOf(id);
+    if (a >= 0 && b >= 0) {
+      const [from, to] = a < b ? [a, b] : [b, a];
+      ids.slice(from, to + 1).forEach((eid) => State.selected.add(eid));
+      State.lastSelectedId = id;
+      renderEntries();
+      return;
+    }
+  }
   if (State.selected.has(id)) State.selected.delete(id);
   else State.selected.add(id);
+  State.lastSelectedId = id;
   renderEntries();
 }
 async function selectAllVisible() {
+  State.suppressListAnimation = true;
+  State.selected.clear();
   State.entries.forEach((e) => State.selected.add(e.id));
+  State.lastSelectedId = State.entries.length ? State.entries[State.entries.length - 1].id : null;
   renderEntries();
 }
 function selectVisibleWhere(predicate) {
+  State.suppressListAnimation = true;
   State.selected.clear();
   State.entries.filter(predicate).forEach((e) => State.selected.add(e.id));
+  const picked = [...State.selected];
+  State.lastSelectedId = picked.length ? picked[picked.length - 1] : null;
   renderEntries();
+}
+
+// ------------------------------------------------------------------ 批次（运营组）
+async function loadBatches() {
+  try {
+    State.batches = await Api.listBatches($('#showArchivedBatches')?.checked);
+  } catch (e) { State.batches = []; }
+  renderBatchList();
+  renderBatchSelect();
+  renderBatchFolders();
+}
+
+function renderBatchList() {
+  const wrap = $('#batchList');
+  if (!wrap) return;
+  wrap.innerHTML = '';
+
+  // “全部条目”入口（退出批次聚焦）
+  const allItem = el('div', 'batch-item' + (State.batchFilter ? '' : ' active'));
+  allItem.innerHTML = `<span class="batch-item-name">全部条目</span>`;
+  allItem.onclick = () => focusBatch('');
+  wrap.appendChild(allItem);
+
+  if (!State.batches.length) {
+    wrap.appendChild(el('div', 'batch-empty', '还没有批次。<br/>把要一起交的条目圈成一批，方便催办和导出。'));
+    return;
+  }
+
+  State.batches.forEach((b) => {
+    const item = el('div', 'batch-item' + (State.batchFilter === b.id ? ' active' : '') + (b.archived ? ' archived' : ''));
+    const st = b.stats || { count: b.count || 0, incomplete: 0, total: '0' };
+    item.innerHTML = `
+      <span class="batch-item-name" title="${esc(b.name)}">${esc(b.name)}</span>
+      <span class="batch-item-meta">
+        <span>${st.count} 条</span>
+        ${st.incomplete ? `<span class="batch-warn" title="${st.incomplete} 条尚未齐备">缺 ${st.incomplete}</span>` : '<span class="batch-ok">齐</span>'}
+      </span>`;
+    item.onclick = () => focusBatch(b.id);
+    item.oncontextmenu = (ev) => { ev.preventDefault(); openBatchMenu(ev.clientX, ev.clientY, b); };
+    wrap.appendChild(item);
+  });
+}
+
+function renderBatchSelect() {
+  const sel = $('#filterBatch');
+  if (!sel) return;
+  const cur = State.batchFilter;
+  sel.innerHTML = '<option value="">全部</option>' + State.batches.map((b) =>
+    `<option value="${esc(b.id)}"${b.id === cur ? ' selected' : ''}>${esc(b.name)}</option>`).join('');
+}
+
+function renderBatchFolders() {
+  const wrap = $('#batchFolders');
+  if (!wrap) return;
+  const folders = State.batches.filter((b) => !b.archived);
+  if (!folders.length && !State.batchFilter) {
+    wrap.innerHTML = '';
+    wrap.classList.add('hidden');
+    return;
+  } else {
+    wrap.classList.remove('hidden');
+    wrap.innerHTML = `
+      <button class="batch-folder all${State.batchFilter ? '' : ' active'}" data-folder="">全部条目</button>
+      ${folders.map((b) => {
+        const st = b.stats || {};
+        return `<span class="batch-folder${State.batchFilter === b.id ? ' active' : ''}" data-folder="${esc(b.id)}">
+          <button class="folder-open" title="${esc(b.name)}">${esc(b.name)}<small>${st.count || 0} 条${st.incomplete ? ` · 缺 ${st.incomplete}` : ''}</small></button>
+          <button class="folder-menu" data-folder-menu="${esc(b.id)}" title="批次操作">⋯</button>
+        </span>`;
+      }).join('')}
+      <button class="batch-folder new" id="folderNewBatch">新建批次</button>`;
+  }
+  wrap.querySelectorAll('[data-folder]').forEach((node) => {
+    node.onclick = (ev) => {
+      if (ev.target instanceof Element && ev.target.closest('[data-folder-menu]')) return;
+      focusBatch(node.dataset.folder || '');
+    };
+  });
+  wrap.querySelectorAll('[data-folder-menu]').forEach((btn) => {
+    btn.onclick = (ev) => {
+      ev.stopPropagation();
+      const b = State.batches.find((x) => x.id === btn.dataset.folderMenu);
+      if (b) openBatchMenu(ev.clientX, ev.clientY, b);
+    };
+  });
+  const newBtn = $('#folderNewBatch');
+  if (newBtn) newBtn.onclick = () => newBatchFlow();
+}
+
+function focusBatch(batchId) {
+  State.batchFilter = batchId || '';
+  const sel = $('#filterBatch');
+  if (sel) sel.value = State.batchFilter;
+  State.selected.clear();
+  renderBatchList();
+  renderBatchContext();
+  renderBatchFolders();
+  refreshEntries();
+}
+
+function renderBatchContext() {
+  const bar = $('#batchContext');
+  if (!bar) return;
+  if (!State.batchFilter) { bar.classList.add('hidden'); bar.innerHTML = ''; return; }
+  const b = State.batches.find((x) => x.id === State.batchFilter);
+  if (!b) { bar.classList.add('hidden'); return; }
+  const st = b.stats || {};
+  const persons = (st.by_person || []).map((p) =>
+    `<span class="ctx-person">${esc(p.name)} <b>${p.count}</b>${p.incomplete ? ` <i title="${p.incomplete} 条未齐">缺${p.incomplete}</i>` : ''}</span>`).join('');
+  bar.classList.remove('hidden');
+  bar.innerHTML = `
+    <div class="ctx-left">
+      <span class="ctx-badge">批次</span>
+      <b class="ctx-name">${esc(b.name)}</b>
+      <span class="ctx-stat">${st.count || 0} 条 · 合计 ${fmtMoney(st.total)}${st.incomplete ? ` · <span class="batch-warn">缺 ${st.incomplete}</span>` : ' · 全部齐备'}</span>
+      <span class="ctx-persons">${persons}</span>
+    </div>
+    <div class="ctx-actions">
+      <button class="btn small ghost" id="ctxExport">导出这批</button>
+      <button class="btn small ghost" id="ctxPrint">打印这批</button>
+      <button class="btn small ghost" id="ctxRename">重命名</button>
+      <button class="btn small ghost" id="ctxArchive">${b.archived ? '取消归档' : '归档'}</button>
+      <button class="btn small ghost" id="ctxExit">退出批次</button>
+    </div>`;
+  const ids = () => State.entries.map((e) => e.id);
+  $('#ctxExport').onclick = () => doExport(ids());
+  $('#ctxPrint').onclick = () => openPrintDialog(ids());
+  $('#ctxRename').onclick = () => renameBatchFlow(b);
+  $('#ctxArchive').onclick = async () => {
+    try { await Api.archiveBatch(b.id, !b.archived); await loadBatches(); if (b.archived) focusBatch(b.id); else focusBatch(''); toast(b.archived ? '已取消归档' : '已归档', 'ok'); }
+    catch (e) { toast(e.message, 'err'); }
+  };
+  $('#ctxExit').onclick = () => focusBatch('');
+}
+
+function openBatchMenu(x, y, b) {
+  closeEntryMenu();
+  const menu = el('div', 'entry-context-menu');
+  const item = (label, fn, danger) => {
+    const btn = el('button', danger ? 'danger' : '', esc(label));
+    btn.onclick = async () => { closeEntryMenu(); await fn(); };
+    menu.appendChild(btn);
+  };
+  item('打开这批', () => focusBatch(b.id));
+  item('重命名', () => renameBatchFlow(b));
+  item(b.archived ? '取消归档' : '归档', async () => {
+    await Api.archiveBatch(b.id, !b.archived); await loadBatches();
+    toast(b.archived ? '已取消归档' : '已归档', 'ok');
+  });
+  item('删除批次', async () => {
+    if (!confirm(`删除批次「${b.name}」？条目本身不会被删除。`)) return;
+    await Api.deleteBatch(b.id);
+    if (State.batchFilter === b.id) focusBatch('');
+    await loadBatches(); toast('批次已删除', 'ok');
+  }, true);
+  menu.style.left = Math.min(x, window.innerWidth - 190) + 'px';
+  menu.style.top = Math.min(y, window.innerHeight - 200) + 'px';
+  document.body.appendChild(menu);
+  setTimeout(() => document.addEventListener('click', closeEntryMenu, { once: true }), 0);
+}
+
+async function renameBatchFlow(b) {
+  const body = el('div');
+  body.innerHTML = `
+    <div class="form-row"><label>批次名称</label><input id="bName" value="${esc(b.name)}"/></div>
+    <div class="form-row"><label>说明（可选）</label><textarea id="bNote" rows="3" style="width:100%;font-family:inherit;font-size:13px;padding:10px;border-radius:9px;border:1px solid var(--line);resize:vertical">${esc(b.note || '')}</textarea></div>`;
+  const m = modal({
+    title: '编辑批次', body,
+    footer: [mkBtn('取消', 'ghost', () => m.close()), mkBtn('保存', 'primary', async () => {
+      const name = body.querySelector('#bName').value.trim();
+      if (!name) { toast('名称不能为空', 'err'); return; }
+      try {
+        await Api.updateBatch(b.id, { name, note: body.querySelector('#bNote').value });
+        m.close(); await loadBatches(); renderBatchContext(); toast('已保存', 'ok');
+      } catch (e) { toast(e.message, 'err'); }
+    })],
+  });
+  setTimeout(() => body.querySelector('#bName')?.focus(), 20);
+}
+
+async function newBatchFlow(presetIds) {
+  const ids = presetIds || [...State.selected];
+  const body = el('div');
+  body.innerHTML = `
+    <div class="form-row"><label>批次名称</label><input id="bName" placeholder="如：7月第一批 / 张三这次的"/></div>
+    <div class="form-row"><label>说明（可选）</label><input id="bNote" placeholder="备注这批的用途"/></div>
+    <div class="hint">${ids.length ? `将把当前选中的 <b>${ids.length}</b> 条装入新批次。` : '创建空批次，之后再从列表选条目加入。'}</div>`;
+  const m = modal({
+    title: '新建批次', body,
+    footer: [mkBtn('取消', 'ghost', () => m.close()), mkBtn('创建', 'primary', async () => {
+      const name = body.querySelector('#bName').value.trim();
+      if (!name) { toast('请填批次名称', 'err'); return; }
+      try {
+        const b = await Api.createBatch(name, body.querySelector('#bNote').value, ids);
+        m.close(); await loadBatches(); focusBatch(b.id);
+        toast(`批次「${name}」已创建`, 'ok');
+      } catch (e) { toast(e.message, 'err'); }
+    })],
+  });
+  setTimeout(() => body.querySelector('#bName')?.focus(), 20);
+}
+
+// 把选中条目加入批次（可选已有批次或新建）
+async function addSelectionToBatch() {
+  const ids = [...State.selected];
+  if (!ids.length) { toast('请先选择条目', 'err'); return; }
+  await loadBatches();
+  const body = el('div');
+  const options = State.batches.filter((b) => !b.archived).map((b) =>
+    `<button class="batch-pick" data-batch="${b.id}"><b>${esc(b.name)}</b><span>${b.stats?.count || 0} 条</span></button>`).join('');
+  body.innerHTML = `
+    <div class="hint">把选中的 <b>${ids.length}</b> 条加入哪个批次？</div>
+    <div class="batch-pick-list">${options || '<div class="hint">还没有批次。</div>'}</div>`;
+  const m = modal({
+    title: '加入批次', body,
+    footer: [mkBtn('取消', 'ghost', () => m.close()), mkBtn('＋ 新建批次装入', 'primary', () => { m.close(); newBatchFlow(ids); })],
+  });
+  body.querySelectorAll('[data-batch]').forEach((btn) => {
+    btn.onclick = async () => {
+      try {
+        const r = await Api.addEntriesToBatch(btn.dataset.batch, ids);
+        m.close(); await loadBatches(); renderBatchContext();
+        toast(`已加入 ${r.added} 条`, 'ok');
+      } catch (e) { toast(e.message, 'err'); }
+    };
+  });
+}
+
+// 批量打标签
+async function tagSelectionFlow() {
+  const ids = [...State.selected];
+  if (!ids.length) { toast('请先选择条目', 'err'); return; }
+  try { State.allTags = await Api.listTags(); } catch (e) { State.allTags = []; }
+  const body = el('div');
+  const existing = State.allTags.map((t) => `<button class="tag-pick" data-tag="${esc(t)}">${esc(t)}</button>`).join('');
+  body.innerHTML = `
+    <div class="segmented compact" style="margin-bottom:12px">
+      <button class="seg active" data-mode="add">添加</button>
+      <button class="seg" data-mode="remove">移除</button>
+    </div>
+    <div class="form-row"><label>标签</label><input id="tagInput" placeholder="输入标签后回车"/></div>
+    ${existing ? `<div class="tag-cloud-label">已用过的标签</div><div class="tag-cloud">${existing}</div>` : ''}`;
+  let mode = 'add';
+  const apply = async (tag) => {
+    tag = (tag || '').trim();
+    if (!tag) return;
+    try {
+      const r = mode === 'remove' ? await Api.removeTag(ids, tag) : await Api.addTag(ids, tag);
+      await refreshTagOptions(); await refreshEntries(); await loadBatches();
+      toast(mode === 'remove' ? `已从 ${r.changed} 条移除「${tag}」` : `已给 ${r.changed} 条打上「${tag}」`, 'ok');
+      m.close();
+    } catch (e) { toast(e.message, 'err'); }
+  };
+  const m = modal({
+    title: '打标签', body,
+    footer: [mkBtn('完成', 'ghost', () => m.close())],
+  });
+  const input = body.querySelector('#tagInput');
+  body.querySelectorAll('[data-mode]').forEach((btn) => {
+    btn.onclick = () => {
+      mode = btn.dataset.mode;
+      body.querySelectorAll('[data-mode]').forEach((b) => b.classList.toggle('active', b === btn));
+    };
+  });
+  input.onkeydown = (ev) => { if (ev.key === 'Enter') { ev.preventDefault(); apply(input.value); } };
+  body.querySelectorAll('[data-tag]').forEach((btn) => { btn.onclick = () => apply(btn.dataset.tag); });
+  setTimeout(() => input.focus(), 20);
 }
 
 // ------------------------------------------------------------------ 卡片快捷
@@ -493,24 +875,16 @@ async function quickDelete(e) {
 function bindEvents() {
   $('#profilePill').onclick = () => openProfileManager(false);
 
-  $$('.title-tab').forEach((tab) => {
-    tab.onclick = () => {
-      $$('.title-tab').forEach((t) => t.classList.remove('active'));
-      tab.classList.add('active');
-      State.activeTitle = tab.dataset.title;
-      State.selected.clear();
-      refreshEntries();
-    };
-  });
-
   $$('[data-view]').forEach((btn) => {
     btn.onclick = () => setQuickView(btn.dataset.view);
   });
 
   let kwTimer;
-  const relist = () => refreshEntries();
-  const relistFromAdvanced = () => { State.quickView = 'all'; updateQuickViewButtons(); refreshEntries(); };
-  $('#filterStatus').onchange = relistFromAdvanced;
+  const relist = () => { State.selected.clear(); refreshEntries(); };
+  const relistFromAdvanced = () => { State.selected.clear(); State.quickView = 'all'; updateQuickViewButtons(); refreshEntries(); };
+  if ($('#filterStatus')) $('#filterStatus').onchange = relistFromAdvanced;
+  $('#filterTitle').onchange = () => { State.activeTitle = $('#filterTitle').value; relist(); };
+  $('#filterBatch').onchange = () => focusBatch($('#filterBatch').value);
   $('#filterCheck').onchange = relistFromAdvanced;
   $('#filterProfile').onchange = relist;
   $('#sortSelect').onchange = relist;
@@ -540,18 +914,37 @@ function bindEvents() {
   $('#batchImportBtn').onclick = openBatchImport;
   $('#settingsBtn').onclick = openSettings;
   $('#emptyNew').onclick = () => openNewEntry();
-  $('#actionExport').onclick = () => doExport(State.selected.size ? [...State.selected] : State.entries.map((e) => e.id));
   $('#actionImport').onclick = doImport;
-  $('#actionPrint').onclick = () => openPrintDialog(State.selected.size ? [...State.selected] : State.entries.map((e) => e.id));
 
   $('#selectAllBtn').onclick = selectAllVisible;
   $('#selectIncompleteBtn').onclick = () => selectVisibleWhere((e) => (e.completeness?.status || e.status) !== 'complete');
   $('#selectWarningBtn').onclick = () => selectVisibleWhere((e) => e.check_status === 'warning' || e.check_status === 'blocked');
-  $('#clearSelBtn').onclick = () => { State.selected.clear(); renderEntries(); };
-  $('#batchSummaryBtn').onclick = exportSummary;
+  $('#clearSelBtn').onclick = () => { State.suppressListAnimation = true; State.selected.clear(); State.lastSelectedId = null; renderEntries(); };
+  $('#addToBatchBtn').onclick = addSelectionToBatch;
+  $('#tagBtn').onclick = tagSelectionFlow;
+  $('#batchSummaryBtn').onclick = () => exportSummary([...State.selected]);
   $('#batchExportBtn').onclick = () => doExport([...State.selected]);
   $('#batchPrintBtn').onclick = () => openPrintDialog([...State.selected]);
   $('#batchDeleteBtn').onclick = batchDelete;
+
+  // 批次侧栏
+  $('#newBatchBtn').onclick = () => newBatchFlow();
+  $('#showArchivedBatches').onchange = loadBatches;
+
+  // 分组浏览
+  $$('[data-group]').forEach((b) => {
+    b.onclick = () => {
+      $$('[data-group]').forEach((x) => x.classList.remove('active'));
+      b.classList.add('active');
+      State.groupBy = b.dataset.group;
+      renderEntries();
+    };
+  });
+
+  // 新增筛选维度
+  $('#filterTag').onchange = () => { State.tagFilter = $('#filterTag').value; relistFromAdvanced(); };
+  $('#filterNotes').onchange = () => { State.notesFilter = $('#filterNotes').value; relistFromAdvanced(); };
+
   setupGlobalDrop();
 
   document.addEventListener('keydown', (e) => {
@@ -567,12 +960,13 @@ function bindEvents() {
 }
 
 function clearAllFilters() {
-  ['filterStatus', 'filterCheck', 'filterProfile', 'filterKeyword', 'filterAmountMin', 'filterAmountMax', 'filterDateFrom', 'filterDateTo'].forEach((id) => { const n = $('#' + id); if (n) n.value = ''; });
-  $$('.title-tab').forEach((t) => t.classList.remove('active'));
-  $$('.title-tab')[0].classList.add('active');
+  ['filterStatus', 'filterCheck', 'filterProfile', 'filterTitle', 'filterBatch', 'filterKeyword', 'filterAmountMin', 'filterAmountMax', 'filterDateFrom', 'filterDateTo', 'filterTag', 'filterNotes'].forEach((id) => { const n = $('#' + id); if (n) n.value = ''; });
   State.quickView = 'all';
   updateQuickViewButtons();
   State.activeTitle = '';
+  State.batchFilter = '';
+  State.tagFilter = '';
+  State.notesFilter = '';
   showSearchHintIfEmpty();
   refreshEntries();
 }
@@ -621,28 +1015,34 @@ function openProfileManager(forceCreate) {
   const wrap = el('div');
 
   function renderList() {
-    const list = el('div');
+    const list = el('div', 'profile-list');
     if (!State.profiles.length) {
-      list.innerHTML = '<div class="hint">还没有身份。在下方面板创建第一个：填本人姓名与对应审核人。</div>';
+      list.innerHTML = '<div class="hint">还没有身份。在下方创建第一个：填本人姓名与对应审核人。</div>';
       return list;
     }
     State.profiles.forEach((p) => {
-      const row = el('div', 'attach-item');
-      row.innerHTML = `<div style="flex:1">
-        <b>${esc(p.name)}</b> → ${esc(p.reviewer)}
-        ${p.is_default ? ' <span class="badge pass">默认</span>' : ''}
-        <div style="font-size:11px;color:var(--ink-faint);margin-top:2px">
-          ${p.student_id ? '学号 ' + esc(p.student_id) + '　' : ''}
-          ${p.bank_name ? esc(p.bank_name) : ''}
-        </div>
+      const row = el('div', 'profile-row');
+      const extra = [
+        p.student_id ? '学号 ' + esc(p.student_id) : '',
+        p.contact ? esc(p.contact) : '',
+        p.bank_name ? esc(p.bank_name) : '',
+        p.bank_card ? '尾号 ' + esc(String(p.bank_card).slice(-4)) : '',
+      ].filter(Boolean).join(' · ');
+      row.innerHTML = `<div class="profile-row-main">
+        <div class="profile-row-title"><b>${esc(p.name)}</b><span class="arrow">→</span>${esc(p.reviewer)}
+          ${p.is_default ? ' <span class="badge pass">默认</span>' : ''}</div>
+        ${extra ? `<div class="profile-row-extra">${extra}</div>` : ''}
       </div>`;
-      if (!p.is_default) row.appendChild(mkBtn('设为默认', 'small ghost', async () => {
+      const actions = el('div', 'profile-row-actions');
+      actions.appendChild(mkBtn('编辑', 'small ghost', () => editProfileFlow(p, refreshProfileList)));
+      if (!p.is_default) actions.appendChild(mkBtn('设为默认', 'small ghost', async () => {
         await Api.setDefaultProfile(p.id); await loadProfiles(); refreshProfileList();
       }));
-      row.appendChild(mkBtn('删除', 'small danger', async () => {
+      actions.appendChild(mkBtn('删除', 'small danger', async () => {
         try { await Api.deleteProfile(p.id); await loadProfiles(); refreshProfileList(); toast('已删除', 'ok'); }
         catch (e) { toast(e.message, 'err'); }
       }));
+      row.appendChild(actions);
       list.appendChild(row);
     });
     return list;
@@ -651,7 +1051,7 @@ function openProfileManager(forceCreate) {
 
   const form = el('div');
   form.innerHTML = `
-    <h3 style="margin:18px 0 10px;font-size:11px;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.06em">新增身份</h3>
+    <h3 class="detail-section" style="margin:18px 0 10px"><span>新增身份</span><span class="h3-line"></span></h3>
     <div class="form-grid">
       <div class="form-row"><label>本人姓名 *</label><input id="pfName" placeholder="必填"/></div>
       <div class="form-row"><label>对应审核人 *</label><input id="pfReviewer" placeholder="必填"/></div>
@@ -659,7 +1059,8 @@ function openProfileManager(forceCreate) {
       <div class="form-row"><label>电话</label><input id="pfContact"/></div>
       <div class="form-row"><label>开户行</label><input id="pfBank"/></div>
       <div class="form-row"><label>卡号</label><input id="pfCard"/></div>
-    </div>`;
+    </div>
+    <div class="hint" style="margin-top:4px">学号 / 电话 / 银行信息供打印导出组件使用，可留空。</div>`;
 
   wrap.appendChild(renderList());
   wrap.appendChild(form);
@@ -677,14 +1078,51 @@ function openProfileManager(forceCreate) {
       });
       await loadProfiles();
       refreshProfileList();
+      ['pfName', 'pfReviewer', 'pfStudent', 'pfContact', 'pfBank', 'pfCard'].forEach((id) => { form.querySelector('#' + id).value = ''; });
       toast('身份已添加', 'ok');
     } catch (e) { toast(e.message, 'err'); }
   });
 
   const m = modal({
     title: '身份管理',
+    subhead: '本人姓名 + 审核人写入导出；一个人可存多个身份，主界面一键切换',
+    wide: true,
     body: wrap,
     footer: [addBtn, mkBtn('关闭', 'ghost', () => m.close())],
+  });
+}
+
+// 编辑已有身份（后端 update_profile 支持全部字段）
+function editProfileFlow(p, onDone) {
+  const body = el('div');
+  body.innerHTML = `
+    <div class="form-grid">
+      <div class="form-row"><label>本人姓名 *</label><input id="epName" value="${esc(p.name)}"/></div>
+      <div class="form-row"><label>对应审核人 *</label><input id="epReviewer" value="${esc(p.reviewer)}"/></div>
+      <div class="form-row"><label>学号</label><input id="epStudent" value="${esc(p.student_id || '')}"/></div>
+      <div class="form-row"><label>电话</label><input id="epContact" value="${esc(p.contact || '')}"/></div>
+      <div class="form-row"><label>开户行</label><input id="epBank" value="${esc(p.bank_name || '')}"/></div>
+      <div class="form-row"><label>卡号</label><input id="epCard" value="${esc(p.bank_card || '')}"/></div>
+    </div>`;
+  const m = modal({
+    title: '编辑身份', body,
+    footer: [mkBtn('取消', 'ghost', () => m.close()), mkBtn('保存', 'primary', async () => {
+      const name = body.querySelector('#epName').value.trim();
+      const reviewer = body.querySelector('#epReviewer').value.trim();
+      if (!name || !reviewer) { toast('姓名与审核人必填', 'err'); return; }
+      try {
+        await Api.updateProfile(p.id, {
+          name, reviewer,
+          student_id: body.querySelector('#epStudent').value.trim(),
+          contact: body.querySelector('#epContact').value.trim(),
+          bank_name: body.querySelector('#epBank').value.trim(),
+          bank_card: body.querySelector('#epCard').value.trim(),
+        });
+        await loadProfiles();
+        m.close(); if (onDone) onDone();
+        toast('已保存', 'ok');
+      } catch (e) { toast(e.message, 'err'); }
+    })],
   });
 }
 
@@ -695,104 +1133,145 @@ async function openSettings() {
     printStatus = await Api.printComponentStatus();
   } catch (e) { toast(e.message, 'err'); return; }
   const body = el('div');
-  const settingsIcons = {
-    profile: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M5 21a7 7 0 0 1 14 0"/></svg>',
-    batch: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7h6l2 2h10v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V7z"/><path d="M12 12v5m0-5-2 2m2-2 2 2"/></svg>',
-    bindle: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M7 3h7l4 4v14H7z"/><path d="M14 3v5h4"/><path d="M11 12v5m0 0-2-2m2 2 2-2"/></svg>',
-    update: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12a8 8 0 0 0-14-5"/><path d="M4 7h5V2"/><path d="M4 12a8 8 0 0 0 14 5"/><path d="M20 17h-5v5"/></svg>',
-    guide: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M5 4h14v16H5z"/><path d="M8 8h8M8 12h8M8 16h5"/></svg>',
-    folder: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7h6l2 2h10v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1z"/></svg>',
-  };
-  const action = (id, icon, title, meta) => `
-    <button class="settings-action" ${id ? `id="${id}"` : ''}>
-      <span class="settings-action-icon">${settingsIcons[icon]}</span>
-      <span class="settings-action-copy"><b>${esc(title)}</b><span>${esc(meta)}</span></span>
-    </button>`;
-  const pathAction = (path, icon, title, meta) => `
-    <button class="settings-action" data-open-path="${esc(path)}">
-      <span class="settings-action-icon">${settingsIcons[icon]}</span>
-      <span class="settings-action-copy"><b>${esc(title)}</b><span>${esc(meta)}</span></span>
-    </button>`;
-  const pathRow = (label, path) => `
-    <div class="settings-path">
-      <b>${esc(label)}</b>
-      <code title="${esc(path)}">${esc(path)}</code>
-      <button class="btn small ghost" data-open-path="${esc(path)}">打开</button>
-    </div>`;
+
+  const profileCount = State.profiles.length;
+  const defaultProfile = State.profiles.find((p) => p.is_default);
   const printBadge = printStatus.available
-    ? '<span class="settings-ok">已可用</span>'
+    ? '<span class="settings-ok">已安装</span>'
     : '<span class="settings-warn">未安装</span>';
   const printDetail = printStatus.available
-    ? '打印材料导出'
-    : (printStatus.missing?.length ? esc(printStatus.missing.join('、')) : '可选组件');
+    ? '可生成发票拼接、报账说明、验收单等打印材料。'
+    : (printStatus.missing?.length ? '缺少：' + esc(printStatus.missing.join('、')) : '可选组件，用于运营组打印。');
+
   body.innerHTML = `
     <div class="settings-shell">
-      <div class="settings-hero">
+      <!-- 身份 -->
+      <div class="settings-block">
+        <div class="settings-row" id="setProfiles">
+          <div class="settings-row-copy">
+            <b>身份信息</b>
+            <span>${profileCount ? `${profileCount} 个身份${defaultProfile ? ' · 默认 ' + esc(defaultProfile.name) + ' → ' + esc(defaultProfile.reviewer) : ''}` : '尚未创建身份'}</span>
+          </div>
+          <button class="btn small">管理</button>
+        </div>
+      </div>
+
+      <!-- 偏好 -->
+      <div class="settings-block">
+        <div class="settings-block-title">偏好</div>
+        <div class="settings-row">
+          <div class="settings-row-copy">
+            <b>启动默认抬头</b>
+            <span>打开软件时默认聚焦哪个抬头分区</span>
+          </div>
+          <select id="setDefaultTitle" class="settings-select">
+            <option value="">全部</option>
+            <option value="北京理工大学">北京理工大学</option>
+            <option value="北京理工大学教育基金会">教育基金会</option>
+          </select>
+        </div>
+        <div class="settings-row">
+          <div class="settings-row-copy">
+            <b>默认列表密度</b>
+            <span>条目列表的默认松紧</span>
+          </div>
+          <select id="setDefaultDensity" class="settings-select">
+            <option value="comfortable">标准</option>
+            <option value="compact">精简</option>
+          </select>
+        </div>
+      </div>
+
+      <!-- 数据位置 -->
+      <div class="settings-block">
+        <div class="settings-block-title">数据位置</div>
+        <div class="settings-datapath">
+          <code title="${esc(paths.root)}">${esc(paths.root)}</code>
+          <span class="settings-datapath-tag">${paths.is_default ? '系统默认位置' : '自定义位置'}</span>
+        </div>
+        <div class="settings-row-actions">
+          <button class="btn small ghost" id="setOpenData">打开文件夹</button>
+          <button class="btn small ghost" id="setOpenExports">打开导出目录</button>
+        </div>
+        <details class="settings-advanced">
+          <summary>高级数据维护</summary>
+          <div class="settings-row-actions">
+            <button class="btn small" id="setMigrate">迁移到新位置…</button>
+            ${paths.is_default ? '' : '<button class="btn small ghost" id="setResetData">恢复默认位置</button>'}
+          </div>
+          <div class="hint" style="margin-top:10px">迁移会整体移动数据库与附件，请选择空文件夹。</div>
+        </details>
+      </div>
+
+      <!-- 可选组件与更新 -->
+      <div class="settings-block">
+        <div class="settings-block-title">组件与更新</div>
+        <div class="settings-row">
+          <div class="settings-row-copy">
+            <b>打印导出组件 ${printBadge}</b>
+            <span>${printDetail}</span>
+          </div>
+        </div>
+        <div class="settings-row" id="setUpdate">
+          <div class="settings-row-copy">
+            <b>检查更新</b>
+            <span>核心程序与可选组件</span>
+          </div>
+          <button class="btn small">检查</button>
+        </div>
+      </div>
+
+      <!-- 关于 -->
+      <div class="settings-block about">
         <img src="assets/tidoc-logo-128.png" alt="" />
         <div>
           <b>tidoc</b>
-          <span>本机数据：<code>${esc(paths.root)}</code></span>
-        </div>
-      </div>
-      <div class="detail-section">
-        <h3>账户与导入<span class="h3-line"></span></h3>
-        <div class="settings-actions">
-          ${action('settingsProfiles', 'profile', '身份信息', '姓名 / 审核人 / 银行卡')}
-          ${action('settingsBatchImport', 'batch', '批量导入', '文件夹 / 多文件')}
-          ${action('settingsImportBindle', 'bindle', '导入绑定包', '.tidoc')}
-          ${action('settingsUsage', 'guide', '使用提示', '导入 / 拖拽 / 绑定')}
-        </div>
-      </div>
-      <div class="detail-section">
-        <h3>输出与维护<span class="h3-line"></span></h3>
-        <div class="settings-actions compact">
-          ${action('settingsUpdate', 'update', '软件更新', '核心 / 打印组件')}
-          ${pathAction(paths.exports, 'folder', '导出目录', 'Excel / 附件包 / 打印材料')}
-        </div>
-        <div class="settings-status-card">
-          <span class="settings-status-label">打印导出</span>
-          <b>${printBadge}</b>
-          <span>${printDetail}</span>
-        </div>
-      </div>
-      <div class="detail-section">
-        <h3>本机数据<span class="h3-line"></span></h3>
-        <div class="settings-paths">
-          ${pathRow('数据目录', paths.root)}
-          ${pathRow('附件仓库', paths.attachments)}
-          ${pathRow('导出目录', paths.exports)}
-          ${pathRow('组件目录', paths.components)}
-          ${pathRow('更新目录', paths.updates)}
-          ${pathRow('数据库', paths.db)}
+          <span>报账凭证管理与整理工具</span>
+          <button class="link-btn" id="setGuide">查看使用提示</button>
         </div>
       </div>
     </div>`;
-  body.querySelectorAll('[data-open-path]').forEach((btn) => {
-    btn.onclick = async () => {
-      try { await Api.openPath(btn.dataset.openPath); }
-      catch (e) { toast(e.message, 'err'); }
-    };
-  });
-  body.querySelector('#settingsProfiles').onclick = () => {
-    m.close();
-    openProfileManager(false);
+
+  // 偏好回填
+  body.querySelector('#setDefaultTitle').value = localStorage.getItem('tidoc.defaultTitle') || '';
+  body.querySelector('#setDefaultDensity').value = localStorage.getItem('tidoc.defaultDensity') || 'comfortable';
+  body.querySelector('#setDefaultTitle').onchange = (ev) => {
+    localStorage.setItem('tidoc.defaultTitle', ev.target.value);
+    State.activeTitle = ev.target.value;
+    const titleSel = $('#filterTitle');
+    if (titleSel) titleSel.value = State.activeTitle;
+    State.selected.clear();
+    refreshEntries();
+    toast('已保存', 'ok');
   };
-  body.querySelector('#settingsBatchImport').onclick = () => {
-    m.close();
-    openBatchImport();
+  body.querySelector('#setDefaultDensity').onchange = (ev) => {
+    localStorage.setItem('tidoc.defaultDensity', ev.target.value);
+    State.density = ev.target.value;
+    $('#entryList').dataset.density = State.density;
+    toast('已保存', 'ok');
   };
-  body.querySelector('#settingsImportBindle').onclick = () => {
-    m.close();
-    doImport();
+
+  body.querySelector('#setProfiles').onclick = () => { m.close(); openProfileManager(false); };
+  body.querySelector('#setUpdate').onclick = () => { m.close(); openUpdateDialog(); };
+  body.querySelector('#setGuide').onclick = () => { m.close(); openUsageGuide(false); };
+  body.querySelector('#setOpenData').onclick = () => Api.openPath(paths.root).catch((e) => toast(e.message, 'err'));
+  body.querySelector('#setOpenExports').onclick = () => Api.openPath(paths.exports).catch((e) => toast(e.message, 'err'));
+  body.querySelector('#setMigrate').onclick = async () => {
+    if (!confirm('迁移数据到新位置？请选择一个空文件夹。迁移过程中请勿关闭软件。')) return;
+    try {
+      const r = await Api.chooseAndMigrateDataRoot();
+      if (r && r.changed) { m.close(); toast('数据已迁移到新位置', 'ok'); openSettings(); }
+    } catch (e) { toast(e.message, 'err'); }
   };
-  body.querySelector('#settingsUpdate').onclick = () => {
-    m.close();
-    openUpdateDialog();
+  const resetBtn = body.querySelector('#setResetData');
+  if (resetBtn) resetBtn.onclick = async () => {
+    if (!confirm('把数据迁回系统默认位置？')) return;
+    try {
+      const r = await Api.resetDataRootToDefault();
+      if (r && r.changed) { m.close(); toast('已恢复默认位置', 'ok'); openSettings(); }
+    } catch (e) { toast(e.message, 'err'); }
   };
-  body.querySelector('#settingsUsage').onclick = () => {
-    m.close();
-    openUsageGuide(false);
-  };
+
   const m = modal({
     title: '设置',
     body,
@@ -872,22 +1351,22 @@ function maybeShowFirstUseGuide() {
 function openUsageGuide(firstRun) {
   const body = el('div');
   body.innerHTML = `
-    <div class="guide-grid">
-      <div class="guide-card">
-        <b>导入发票</b>
-        <span>把发票 PDF 或 XML 拖到主界面空白处，或点“批量导入”。PDF 会创建条目，XML 只辅助识别。</span>
+    <div class="guide-steps">
+      <div>
+        <b>1. 导入发票</b>
+        <span>拖入 PDF，或用批量导入处理一组发票。XML 可辅助识别。</span>
       </div>
-      <div class="guide-card">
-        <b>补材料</b>
-        <span>付款截图、查验单拖到某个条目卡片，或打开条目后拖到“报账材料”。主界面拖入会让你选择绑定条目。</span>
+      <div>
+        <b>2. 补齐材料</b>
+        <span>把付款截图、查验单拖到条目卡片，或在条目里添加。</span>
       </div>
-      <div class="guide-card">
-        <b>防误绑</b>
-        <span>重复文件会被拦截；发票 PDF/XML 拖进条目时会先核对发票号，避免混入另一张发票。</span>
+      <div>
+        <b>3. 筛选检查</b>
+        <span>用待补材料、需确认、抬头、报账人缩小范围。</span>
       </div>
-      <div class="guide-card">
-        <b>批量处理</b>
-        <span>选中多条后可汇总、导出、打印。筛选和排序用于先缩小范围，再统一处理。</span>
+      <div>
+        <b>4. 批量处理</b>
+        <span>先选当前列表或异常条目，再汇总、导出、打印或装入批次。</span>
       </div>
     </div>`;
   const m = modal({

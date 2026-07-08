@@ -6,6 +6,8 @@
 - field_history 字段级修改历史，不可擦除（第 6.2 节）
 - items         物品明细（识别得到，默认只读）
 - attachments   附件
+- batches       报账批次（运营组工作单元，可命名、可留存的条目集合）
+- batch_entries 批次↔条目关联（多对多），带批次级催办备注
 
 关键信息（发票号码、总额、抬头、税号）作为 entries 的列，软件内默认只读；
 可改字段（实付金额、实际物资名称、备注等）走 entry_fields 以便留痕。
@@ -15,7 +17,8 @@ from __future__ import annotations
 
 import sqlite3
 
-SCHEMA_VERSION = 1
+# v1：初版；v2：新增 batches / batch_entries（运营组批次）。
+SCHEMA_VERSION = 2
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -118,14 +121,49 @@ CREATE TABLE IF NOT EXISTS attachments (
 );
 
 CREATE INDEX IF NOT EXISTS idx_attachments_entry ON attachments(entry_id);
+
+-- 报账批次：运营组把「这次要交的一批」自由圈选、命名、留存的集合（第 8.5、9 节）。
+-- 一个批次可跨报账人、跨抬头装入任意条目；一个条目也可同时属于多个批次。
+CREATE TABLE IF NOT EXISTS batches (
+    id          TEXT PRIMARY KEY,
+    name        TEXT NOT NULL,
+    note        TEXT DEFAULT '',            -- 批次说明
+    archived    INTEGER NOT NULL DEFAULT 0, -- 归档（已交/收档）后不占主列表
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
+);
+
+-- 批次↔条目多对多。note 是「批次级」催办备注（如「张三缺查验单」），
+-- 与条目自身的记账备注（entry_fields.notes）分离，不互相污染。
+CREATE TABLE IF NOT EXISTS batch_entries (
+    batch_id    TEXT NOT NULL,
+    entry_id    TEXT NOT NULL,
+    note        TEXT DEFAULT '',
+    added_at    TEXT NOT NULL,
+    PRIMARY KEY (batch_id, entry_id),
+    FOREIGN KEY (batch_id) REFERENCES batches(id) ON DELETE CASCADE,
+    FOREIGN KEY (entry_id) REFERENCES entries(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_batch_entries_batch ON batch_entries(batch_id);
+CREATE INDEX IF NOT EXISTS idx_batch_entries_entry ON batch_entries(entry_id);
 """
 
 
 def init_db(conn: sqlite3.Connection) -> None:
-    """建表并写入 schema 版本。幂等。"""
+    """建表并写入 / 升级 schema 版本。幂等，可安全升级历史库。
+
+    所有表用 CREATE TABLE IF NOT EXISTS，历史 v1 库缺的新表会被补齐，
+    已有表与数据不动。schema_version 记录当前版本，供后续按需迁移列。
+    """
     conn.executescript(SCHEMA)
     conn.execute(
         "INSERT OR IGNORE INTO meta(key, value) VALUES('schema_version', ?)",
         (str(SCHEMA_VERSION),),
+    )
+    # 历史库升级：把 schema_version 抬到当前版本（新表已由上面的 executescript 补齐）。
+    conn.execute(
+        "UPDATE meta SET value = ? WHERE key = 'schema_version' AND CAST(value AS INTEGER) < ?",
+        (str(SCHEMA_VERSION), SCHEMA_VERSION),
     )
     conn.commit()

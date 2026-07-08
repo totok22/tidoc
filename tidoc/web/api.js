@@ -33,7 +33,7 @@ const Api = (() => {
     ready: waitReady,
     listProfiles: () => call('list_profiles'),
     createProfile: (name, reviewer, isDefault, opt) => call('create_profile', name, reviewer, isDefault, opt || {}),
-    updateProfile: (id, fields) => call('update_profile', id, fields),
+    updateProfile: (id, fields) => call('update_profile', id, fields || {}),
     setDefaultProfile: (id) => call('set_default_profile', id),
     deleteProfile: (id) => call('delete_profile', id),
 
@@ -50,6 +50,21 @@ const Api = (() => {
     setMeta: (id, category, tags) => call('set_meta', id, category, tags),
     deleteEntry: (id) => call('delete_entry', id),
     deleteEntries: (ids) => call('delete_entries', ids),
+
+    addTag: (ids, tag) => call('add_tag', ids, tag),
+    removeTag: (ids, tag) => call('remove_tag', ids, tag),
+    listTags: () => call('list_tags'),
+
+    listBatches: (includeArchived) => call('list_batches', !!includeArchived),
+    getBatch: (id) => call('get_batch', id),
+    createBatch: (name, note, entryIds) => call('create_batch', name, note || '', entryIds || []),
+    updateBatch: (id, fields) => call('update_batch', id, fields || {}),
+    archiveBatch: (id, archived) => call('archive_batch', id, archived !== false),
+    deleteBatch: (id) => call('delete_batch', id),
+    addEntriesToBatch: (id, entryIds) => call('add_entries_to_batch', id, entryIds || []),
+    removeEntriesFromBatch: (id, entryIds) => call('remove_entries_from_batch', id, entryIds || []),
+    setBatchEntryNote: (id, entryId, note) => call('set_batch_entry_note', id, entryId, note || ''),
+    batchesOfEntry: (entryId) => call('batches_of_entry', entryId),
 
     addItem: (entryId, fields) => call('add_item', entryId, fields || {}),
     updateItem: (itemId, fields) => call('update_item', itemId, fields || {}),
@@ -83,6 +98,8 @@ const Api = (() => {
     cleanupDroppedFiles: (paths) => call('cleanup_dropped_files', paths || []),
     batchCreateEntries: (profileId, groups, title) => call('batch_create_entries', profileId, groups, title || ''),
     dataRoot: () => call('data_root_path'),
+    chooseAndMigrateDataRoot: () => call('choose_and_migrate_data_root'),
+    resetDataRootToDefault: () => call('reset_data_root_to_default'),
     openPath: (path) => call('open_path', path),
   };
 })();

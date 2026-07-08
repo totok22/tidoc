@@ -8,6 +8,7 @@ from .attachments import (
     TYPE_OTHER,
     TYPE_PAYMENT,
 )
+from .batches import BatchRepo
 from .database import Database
 from .entries import (
     EDITABLE_FIELDS,
@@ -27,6 +28,7 @@ __all__ = [
     "ProfileRepo",
     "EntryRepo",
     "AttachmentRepo",
+    "BatchRepo",
     "EDITABLE_FIELDS",
     "LOCKED_FIELDS",
     "STATUS_DRAFT",

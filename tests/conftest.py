@@ -32,7 +32,7 @@ def api():
 
 @pytest.fixture
 def repos():
-    from tidoc.db import AttachmentRepo, Database, DataRoot, EntryRepo, ProfileRepo
+    from tidoc.db import AttachmentRepo, BatchRepo, Database, DataRoot, EntryRepo, ProfileRepo
     root = DataRoot(tempfile.mkdtemp())
     db = Database(root.db_path)
     return {
@@ -41,4 +41,5 @@ def repos():
         "profiles": ProfileRepo(db),
         "entries": EntryRepo(db),
         "attachments": AttachmentRepo(db, root),
+        "batches": BatchRepo(db),
     }

@@ -18,6 +18,7 @@ from pathlib import Path
 
 from .db import (
     AttachmentRepo,
+    BatchRepo,
     Database,
     DataRoot,
     EntryRepo,
@@ -45,11 +46,12 @@ def _guard(func):
 
 class Api:
     def __init__(self, data_root: str | Path | None = None):
-        self.data_root = DataRoot(data_root)
+        self.data_root = DataRoot(data_root, manage_pointer=True)
         self.db = Database(self.data_root.db_path)
         self.profiles = ProfileRepo(self.db)
         self.entries = EntryRepo(self.db)
         self.attachments = AttachmentRepo(self.db, self.data_root)
+        self.batches = BatchRepo(self.db)
         self._window = None
         _cleanup_old_dropped_files(self.data_root.dropped_dir)
 
@@ -238,6 +240,61 @@ class Api:
         n = self.entries.delete_many(entry_ids)
         return {"deleted": n}
 
+    # ------------------------------------------------------------ 标签（批量）
+    @_guard
+    def add_tag(self, entry_ids, tag):
+        return {"changed": self.entries.add_tag(entry_ids or [], tag)}
+
+    @_guard
+    def remove_tag(self, entry_ids, tag):
+        return {"changed": self.entries.remove_tag(entry_ids or [], tag)}
+
+    @_guard
+    def list_tags(self):
+        return self.entries.all_tags()
+
+    # ------------------------------------------------------------ 批次（运营组工作单元）
+    @_guard
+    def list_batches(self, include_archived=False):
+        return self.batches.list(include_archived=include_archived)
+
+    @_guard
+    def get_batch(self, batch_id):
+        return self.batches.get(batch_id)
+
+    @_guard
+    def create_batch(self, name, note="", entry_ids=None):
+        return self.batches.create(name, note or "", entry_ids or [])
+
+    @_guard
+    def update_batch(self, batch_id, fields=None):
+        return self.batches.update(batch_id, **(fields or {}))
+
+    @_guard
+    def archive_batch(self, batch_id, archived=True):
+        return self.batches.set_archived(batch_id, archived)
+
+    @_guard
+    def delete_batch(self, batch_id):
+        self.batches.delete(batch_id)
+        return {"deleted": batch_id}
+
+    @_guard
+    def add_entries_to_batch(self, batch_id, entry_ids):
+        return {"added": self.batches.add_entries(batch_id, entry_ids or [])}
+
+    @_guard
+    def remove_entries_from_batch(self, batch_id, entry_ids):
+        return {"removed": self.batches.remove_entries(batch_id, entry_ids or [])}
+
+    @_guard
+    def set_batch_entry_note(self, batch_id, entry_id, note):
+        return self.batches.set_entry_note(batch_id, entry_id, note or "")
+
+    @_guard
+    def batches_of_entry(self, entry_id):
+        return self.batches.batches_of_entry(entry_id)
+
     # ------------------------------------------------------------ 明细行
     @_guard
     def add_item(self, entry_id, fields=None):
@@ -399,6 +456,59 @@ class Api:
 
     @_guard
     def data_root_path(self):
+        from .db.paths import default_data_root
+        d = self._paths_dict()
+        d["is_default"] = str(self.data_root.root) == str(default_data_root())
+        return d
+
+    @_guard
+    def choose_and_migrate_data_root(self):
+        """弹出文件夹选择框，把数据迁到用户选的空目录，并热重建各仓库。
+
+        选中目录后：关闭当前 DB 连接 → 移动全部数据 → 用新根重开连接与仓库。
+        返回新的路径清单，供前端刷新设置页显示。
+        """
+        import webview
+        result = self._window.create_file_dialog(
+            _file_dialog_kind(webview, "FOLDER", "FOLDER_DIALOG")
+        )
+        target = (list(result)[0] if result else "") if result else ""
+        if not target:
+            return {"ok": True, "data": {"changed": False}}
+        old_root = self.data_root
+        # 先断开 DB（释放 sqlite 文件句柄），再搬运，避免 Windows 下占用无法移动。
+        self.db.close()
+        try:
+            new_root_path = old_root.migrate_to(target)
+        except Exception:
+            # 迁移失败：用原根恢复连接，保证应用可继续用。
+            self._rebuild_repos(old_root.root)
+            raise
+        self._rebuild_repos(new_root_path)
+        return {"ok": True, "data": {"changed": True, **self._paths_dict()}}
+
+    @_guard
+    def reset_data_root_to_default(self):
+        """把数据迁回系统默认目录（清除迁移指针）。"""
+        from .db.paths import default_data_root
+        default = default_data_root()
+        if str(self.data_root.root) == str(default):
+            return {"changed": False}
+        self.db.close()
+        new_root_path = self.data_root.migrate_to(default)
+        self._rebuild_repos(new_root_path)
+        return {"changed": True, **self._paths_dict()}
+
+    def _rebuild_repos(self, root) -> None:
+        """用给定数据根重建 DataRoot / Database 及各仓库（迁移后热切换）。"""
+        self.data_root = DataRoot(root, manage_pointer=True)
+        self.db = Database(self.data_root.db_path)
+        self.profiles = ProfileRepo(self.db)
+        self.entries = EntryRepo(self.db)
+        self.attachments = AttachmentRepo(self.db, self.data_root)
+        self.batches = BatchRepo(self.db)
+
+    def _paths_dict(self) -> dict:
         return {
             "root": str(self.data_root.root),
             "attachments": str(self.data_root.attachments_dir),
