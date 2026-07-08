@@ -43,6 +43,8 @@ jobs:
         run: >
           pyinstaller --noconfirm --clean --onefile --windowed
           --name tidoc
+          --paths "."
+          --collect-submodules tidoc
           --icon "tidoc/web/assets/tidoc-logo.icns"
           --add-data "tidoc/web;tidoc/web"
           scripts/tidoc_app_entry.py
@@ -54,6 +56,8 @@ jobs:
         run: >
           pyinstaller --noconfirm --clean --onefile
           --name tidoc_print
+          --paths "."
+          --collect-submodules tidoc_print
           --add-data "tidoc_print/templates;tidoc_print/templates"
           scripts/tidoc_print_entry.py
 
@@ -96,6 +100,8 @@ jobs:
         run: >
           pyinstaller --noconfirm --clean --onedir --windowed
           --name "tidoc"
+          --paths "."
+          --collect-submodules tidoc
           --icon "tidoc/web/assets/tidoc-logo.icns"
           --add-data "tidoc/web:tidoc/web"
           scripts/tidoc_app_entry.py
@@ -118,6 +124,8 @@ jobs:
         run: >
           pyinstaller --noconfirm --clean --onefile
           --name tidoc_print
+          --paths "."
+          --collect-submodules tidoc_print
           --add-data "tidoc_print/templates:tidoc_print/templates"
           scripts/tidoc_print_entry.py
 
