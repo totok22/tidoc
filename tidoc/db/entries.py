@@ -334,6 +334,33 @@ class EntryRepo:
         self.db.conn.commit()
         return self.get(entry_id)
 
+    def set_profile(self, entry_id: str, new_profile_id: str, operator_profile_id: str = "") -> dict:
+        """修改条目归属的报账人。"""
+        row = self.db.conn.execute(
+            """SELECT e.profile_id, old_p.name AS old_name, old_p.reviewer AS old_reviewer
+                 FROM entries e
+                 LEFT JOIN profiles old_p ON old_p.id = e.profile_id
+                WHERE e.id = ?""",
+            (entry_id,),
+        ).fetchone()
+        if row is None:
+            raise ValueError("条目不存在。")
+        prof = self.db.conn.execute(
+            "SELECT name, reviewer FROM profiles WHERE id = ?", (new_profile_id,)
+        ).fetchone()
+        if prof is None:
+            raise ValueError("报账人不存在。")
+        old_profile_id = row["profile_id"] or ""
+        if new_profile_id == old_profile_id:
+            return self.get(entry_id)
+        old_value = " → ".join([x for x in (row["old_name"], row["old_reviewer"]) if x]) or old_profile_id
+        new_value = " → ".join([x for x in (prof["name"], prof["reviewer"]) if x]) or new_profile_id
+        self.db.conn.execute("UPDATE entries SET profile_id = ? WHERE id = ?", (new_profile_id, entry_id))
+        self._log_history(entry_id, "报账人", old_value, new_value, operator_profile_id)
+        self._touch(entry_id)
+        self.db.conn.commit()
+        return self.get(entry_id)
+
     def _log_history(self, entry_id, field, old_value, new_value, profile_id) -> None:
         self.db.conn.execute(
             """INSERT INTO field_history(entry_id, field, old_value, new_value, profile_id, changed_at)

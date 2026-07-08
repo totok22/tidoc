@@ -251,6 +251,10 @@ class Api:
         return self.entries.correct_locked_field(entry_id, field, value, profile_id)
 
     @_guard
+    def update_entry_profile(self, entry_id, profile_id, operator_profile_id=""):
+        return self.entries.set_profile(entry_id, profile_id, operator_profile_id)
+
+    @_guard
     def set_status(self, entry_id, status):
         self.entries.set_status(entry_id, status)
         return {"entry_id": entry_id, "status": status}
@@ -510,6 +514,8 @@ class Api:
         from .services.printing import build_prints as _build
         name = out_name or "打印件"
         out_dir = self.data_root.exports_dir / name
+        options = dict(options or {})
+        options["operator_profile"] = self._operator_profile_for_print()
         return _build(self.entries, self.profiles, self.data_root.attachments_dir,
                       entry_ids, out_dir, options, self.data_root.components_dir)
 
@@ -618,6 +624,20 @@ class Api:
             "components": str(self.data_root.components_dir),
             "updates": str(self.data_root.updates_dir),
         }
+
+    def _operator_profile_for_print(self) -> dict:
+        keys = {
+            "person_name": "tidoc.operator.name",
+            "student_id": "tidoc.operator.student_id",
+            "contact": "tidoc.operator.contact",
+            "bank_name": "tidoc.operator.bank_name",
+            "bank_card": "tidoc.operator.bank_card",
+        }
+        profile = {}
+        for out_key, pref_key in keys.items():
+            row = self.db.conn.execute("SELECT value FROM meta WHERE key = ?", (pref_key,)).fetchone()
+            profile[out_key] = row["value"] if row else ""
+        return profile
 
     @_guard
     def open_path(self, path):

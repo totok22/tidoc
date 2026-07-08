@@ -60,6 +60,58 @@ def test_locked_field_correction_logged(repos, sample_xmls):
     assert any("人工修正" in h["field"] for h in e["history"])
 
 
+def test_entry_profile_can_be_changed_and_logged(repos, sample_xmls):
+    p1 = repos["profiles"].create("张三", "李老师")
+    p2 = repos["profiles"].create("王五", "赵老师")
+    parsed = parse_xml(sample_xmls[0])
+    eid = repos["entries"].create(p1["id"], title=parsed.buyer_name, parsed=parsed)
+
+    e = repos["entries"].set_profile(eid, p2["id"], p1["id"])
+
+    assert e["profile_id"] == p2["id"]
+    assert any(h["field"] == "报账人" and "王五" in h["new_value"] for h in e["history"])
+
+
+def test_print_uses_operator_profile_for_reimburse_doc(repos, sample_xmls, tmp_path, monkeypatch):
+    from tidoc.services import printing
+
+    claimant = repos["profiles"].create("张三", "李老师")
+    parsed = parse_xml(sample_xmls[0])
+    eid = repos["entries"].create(claimant["id"], title=parsed.buyer_name, parsed=parsed)
+    captured = {}
+
+    monkeypatch.setattr(
+        printing,
+        "component_status",
+        lambda components_dir=None: {"available": True, "mode": "external", "path": "tidoc-print", "missing": []},
+    )
+
+    def fake_external(executable, entries, out_dir, options, profiles):
+        captured["entries"] = entries
+        captured["profiles"] = profiles
+        return {"results": []}
+
+    monkeypatch.setattr(printing, "_build_prints_external", fake_external)
+    printing.build_prints(
+        repos["entries"],
+        repos["profiles"],
+        tmp_path,
+        [eid],
+        tmp_path / "out",
+        {"operator_profile": {
+            "person_name": "运营同学",
+            "student_id": "112233",
+            "contact": "13800000000",
+            "bank_name": "测试银行",
+            "bank_card": "62220000",
+        }},
+    )
+
+    assert captured["entries"][0]["profile_name"] == "张三"
+    assert captured["profiles"][eid]["person_name"] == "运营同学"
+    assert captured["profiles"][eid]["bank_card"] == "62220000"
+
+
 def test_list_filters(repos, sample_xmls):
     p = repos["profiles"].create("张三", "李老师")
     for x in sample_xmls[:3]:

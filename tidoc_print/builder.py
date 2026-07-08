@@ -4,7 +4,7 @@
 - 输入一组 PrintEntry（可跨人）+ 选项。
 - 按抬头强隔离分组，每个抬头单独出一套文件，绝不混合（第 7 节）。
 - 生成：发票拼接 PDF、付款截图拼接 PDF、查验单拼接 PDF、报账说明 Word、验收单 Word。
-- 拼接页可叠加信息，字段可勾选。
+- 拼接页只叠加份数 / 页码编号。
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ from .models import PersonProfile, PrintEntry
 from .pdf_merge import images_to_pdf, merge_pdfs
 from .word_docs import generate_acceptance_doc, generate_reimburse_doc
 
-# 可叠加到拼接页的信息字段（设计文档第 9 节：具体加哪些可勾选）
+# 旧配置保留兼容；当前打印件只使用固定编号，不再展示发票号/姓名/金额。
 ANNOTATION_FIELDS = ("invoice_no", "invoice_date", "seller", "person_name", "paid_amount", "total")
 _ANNOTATION_LABEL = {
     "invoice_no": "发票号", "invoice_date": "日期", "seller": "销售方",
@@ -32,6 +32,7 @@ class PrintOptions:
     storage_location: str = "工训楼"
     annotate: bool = True                         # 拼接页是否叠加信息
     annotation_fields: tuple[str, ...] = ("invoice_no", "person_name", "paid_amount")
+    batch_note: str = ""
     make_invoice_pdf: bool = True
     make_payment_pdf: bool = True
     make_inspection_pdf: bool = True
@@ -102,25 +103,42 @@ def build_print_package(
                     paths.append(pdf)
                     annos.append(_annotation_for(e, options.annotation_fields) if options.annotate else "")
             if paths:
-                out = merge_pdfs(paths, title_dir / "发票拼接.pdf", annos if options.annotate else None)
+                out = merge_pdfs(
+                    paths,
+                    title_dir / "发票拼接.pdf",
+                    annos if options.annotate else None,
+                    numbered=True,
+                    batch_note=options.batch_note,
+                )
                 res.files["invoice_pdf"] = str(out)
 
         # 2. 付款截图拼接 PDF
         if options.make_payment_pdf:
             imgs, annos = [], []
-            for e in group:
-                for img in e.payment_images:
+            for entry_idx, e in enumerate(group, start=1):
+                total_images = len(e.payment_images)
+                for img_idx, img in enumerate(e.payment_images, start=1):
                     imgs.append(img)
-                    annos.append(_annotation_for(e, options.annotation_fields) if options.annotate else "")
+                    annos.append(f"第{entry_idx}份-{img_idx}/{total_images}" if options.annotate else "")
             if imgs:
-                out = images_to_pdf(imgs, title_dir / "付款截图拼接.pdf", annos if options.annotate else None)
+                out = images_to_pdf(
+                    imgs,
+                    title_dir / "付款截图拼接.pdf",
+                    annos if options.annotate else None,
+                    batch_note=options.batch_note,
+                )
                 res.files["payment_pdf"] = str(out)
 
         # 3. 查验单拼接 PDF
         if options.make_inspection_pdf:
             paths = [p for e in group for p in e.inspection_pdfs]
             if paths:
-                out = merge_pdfs(paths, title_dir / "查验单拼接.pdf")
+                out = merge_pdfs(
+                    paths,
+                    title_dir / "查验单拼接.pdf",
+                    numbered=True,
+                    batch_note=options.batch_note,
+                )
                 res.files["inspection_pdf"] = str(out)
 
         # 4. 报账说明 Word（按报账人分别出，因抬头段是个人信息）

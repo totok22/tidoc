@@ -17,6 +17,7 @@ const State = {
   batchFilter: '',       // 当前聚焦的批次 id（在批次内浏览 / 管理）
   batches: [],           // 批次列表缓存
   allTags: [],           // 全库用过的标签
+  multiClaimantMode: false,
 };
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -39,8 +40,16 @@ function toast(msg, kind) {
 const TITLE_CLASS = { '北京理工大学': 'univ', '北京理工大学教育基金会': 'found' };
 const TITLE_SHORT = { '北京理工大学': '北京理工大学', '北京理工大学教育基金会': '教育基金会' };
 const STATUS_LABEL = { draft: '草稿', partial: '部分材料', complete: '完整' };
-const CHECK_LABEL = { pass: '校验通过', warning: '需确认', blocked: '问题严重' };
+const CHECK_LABEL = { pass: '校验通过', warning: '识别提醒', blocked: '严重问题' };
 const FIRST_USE_GUIDE_KEY = 'tidoc.firstUseGuide.v1';
+const MULTI_CLAIMANT_KEY = 'tidoc.multiClaimantMode';
+const OPERATOR_PREF_KEYS = {
+  name: 'tidoc.operator.name',
+  student_id: 'tidoc.operator.student_id',
+  contact: 'tidoc.operator.contact',
+  bank_name: 'tidoc.operator.bank_name',
+  bank_card: 'tidoc.operator.bank_card',
+};
 const FIELD_LABEL = {
   paid_amount: '实付金额', actual_item_name: '实际物资名称', notes: '备注',
   invoice_no: '发票号码', total: '价税合计', buyer_name: '购买方抬头',
@@ -57,6 +66,11 @@ function initials(name) {
   return Array.from(name).slice(0, 2).join('');
 }
 function baseName(p) { return String(p).split(/[/\\]/).pop(); }
+function dirName(p) {
+  const s = String(p || '');
+  const idx = Math.max(s.lastIndexOf('/'), s.lastIndexOf('\\'));
+  return idx > 0 ? s.slice(0, idx) : s;
+}
 function dateShort(s) {
   if (!s) return '无日期';
   return s.length > 10 ? s.slice(0, 10) : s;
@@ -89,12 +103,23 @@ function wrapSvg(svg, s) {
 async function init() {
   applyPreferences();
   bindEvents();
+  await loadWorkflowPreferences();
   await loadProfiles();
   await loadBatches();
   await refreshEntries();
   await refreshTagOptions();
   showSearchHintIfEmpty();
   await maybeShowFirstUseGuide();
+}
+
+async function loadWorkflowPreferences() {
+  const local = localStorage.getItem(MULTI_CLAIMANT_KEY);
+  State.multiClaimantMode = local === '1';
+  try {
+    const v = await Api.appPreference(MULTI_CLAIMANT_KEY, local || '');
+    State.multiClaimantMode = v === '1';
+    if (v) localStorage.setItem(MULTI_CLAIMANT_KEY, v);
+  } catch (e) {}
 }
 
 // 启动时套用用户在设置里选的默认抬头 / 密度
@@ -135,6 +160,7 @@ async function loadProfiles() {
 }
 
 function renderProfilePill() {
+  if (!$('#profileName') || !$('#profileReviewer') || !$('#profileAvatar')) return;
   const p = State.profileById[State.currentProfileId];
   if (!p) {
     $('#profileName').textContent = '未选择';
@@ -155,6 +181,26 @@ function renderProfileSelects() {
     o.value = p.id; o.textContent = p.name;
     sel.appendChild(o);
   });
+}
+
+function profileOptionsHtml(selectedId) {
+  const selected = selectedId || State.currentProfileId || State.profiles[0]?.id || '';
+  return State.profiles.map((p) =>
+    `<option value="${esc(p.id)}"${p.id === selected ? ' selected' : ''}>${esc(p.name)} · ${esc(p.reviewer)}</option>`
+  ).join('');
+}
+
+function selectedClaimantId(root) {
+  return root.querySelector('[data-claimant-select]')?.value || State.currentProfileId || State.profiles[0]?.id || '';
+}
+
+function claimantConfirmHtml() {
+  if (!State.multiClaimantMode || State.profiles.length <= 1) return '';
+  return `
+    <div class="form-row claimant-row">
+      <label>报账人</label>
+      <select data-claimant-select>${profileOptionsHtml(State.profiles[0]?.id)}</select>
+    </div>`;
 }
 
 // ------------------------------------------------------------------ 筛选
@@ -278,6 +324,9 @@ function entryCard(e) {
   const notesCur = fields.notes ? fields.notes.current : '';
   const actualCur = fields.actual_item_name ? fields.actual_item_name.current : '';
   const paidCur = fields.paid_amount ? fields.paid_amount.current : '';
+  const owner = State.profileById[e.profile_id];
+  const ownerBadge = (State.multiClaimantMode || State.profiles.length > 1) && owner
+    ? `<span class="badge person" title="报账人：${esc(owner.name)} · 审核人：${esc(owner.reviewer)}">${esc(owner.name)}</span>` : '';
 
   // 完整度：基于后端派生的 completeness（状态自动推导），缺项做 tooltip
   const comp = e.completeness || { ready: false, status: e.status, missing: [] };
@@ -299,6 +348,7 @@ function entryCard(e) {
   const main = el('div', 'entry-main', `
     <div class="entry-line1">
       <span class="entry-item-title" title="${esc(itemTitle)}">${esc(itemTitle)}</span>
+      ${ownerBadge}
       ${compBadge}
       ${checkBadge}
       ${modified}
@@ -511,15 +561,6 @@ async function selectAllVisible() {
   State.lastSelectedId = State.entries.length ? State.entries[State.entries.length - 1].id : null;
   renderEntries();
 }
-function selectVisibleWhere(predicate) {
-  State.suppressListAnimation = true;
-  State.selected.clear();
-  State.entries.filter(predicate).forEach((e) => State.selected.add(e.id));
-  const picked = [...State.selected];
-  State.lastSelectedId = picked.length ? picked[picked.length - 1] : null;
-  renderEntries();
-}
-
 // ------------------------------------------------------------------ 批次（运营组）
 async function loadBatches() {
   try {
@@ -632,14 +673,7 @@ function renderBatchContext() {
   bar.innerHTML = `
     <div class="ctx-left">
       ${persons ? `<span class="ctx-persons">${persons}</span>` : '<span class="ctx-persons muted">暂无人员拆分</span>'}
-    </div>
-    <div class="ctx-actions">
-      <button class="btn small primary" id="ctxExport">导出</button>
-      <button class="btn small ghost" id="ctxPrint">打印</button>
     </div>`;
-  const ids = () => State.entries.map((e) => e.id);
-  $('#ctxExport').onclick = () => doExport(ids());
-  $('#ctxPrint').onclick = () => openPrintDialog(ids());
   // 重命名 / 归档 / 删除统一走 tab 的「⋯」菜单，此处不重复。
 }
 
@@ -737,8 +771,8 @@ async function addSelectionToBatch() {
 }
 
 // 批量打标签
-async function tagSelectionFlow() {
-  const ids = [...State.selected];
+async function tagSelectionFlow(idsArg) {
+  const ids = Array.isArray(idsArg) ? idsArg : [...State.selected];
   if (!ids.length) { toast('请先选择条目', 'err'); return; }
   try { State.allTags = await Api.listTags(); } catch (e) { State.allTags = []; }
   const body = el('div');
@@ -748,7 +782,7 @@ async function tagSelectionFlow() {
       <button class="seg active" data-mode="add">添加</button>
       <button class="seg" data-mode="remove">移除</button>
     </div>
-    <div class="form-row"><label>标签</label><input id="tagInput" placeholder="输入标签后回车"/></div>
+    <div class="form-row"><label>条目标签</label><input id="tagInput" placeholder="输入标签后回车"/></div>
     ${existing ? `<div class="tag-cloud-label">已用过的标签</div><div class="tag-cloud">${existing}</div>` : ''}`;
   let mode = 'add';
   const apply = async (tag) => {
@@ -762,7 +796,7 @@ async function tagSelectionFlow() {
     } catch (e) { toast(e.message, 'err'); }
   };
   const m = modal({
-    title: '打标签', body,
+    title: '条目标签', body,
     footer: [mkBtn('完成', 'ghost', () => m.close())],
   });
   const input = body.querySelector('#tagInput');
@@ -829,15 +863,27 @@ async function maybeSetPaidFromInvoice(entryId) {
 
 function askUseInvoiceTotal(total, alreadyDefault) {
   return new Promise((resolve) => {
+    let settled = false;
+    const done = (value) => {
+      if (settled) return;
+      settled = true;
+      m.close();
+      resolve(value);
+    };
     const body = el('div', 'hint', '付款截图已添加。');
     const m = modal({
       title: '实付金额',
       body,
       footer: [
-        mkBtn('修改实付', 'ghost', () => { m.close(); resolve(false); }),
-        mkBtn(`${alreadyDefault ? '保持' : '按'} ${fmtMoney(total)}`, 'primary', () => { m.close(); resolve(true); }),
+        mkBtn('修改实付', 'ghost', () => done(false)),
+        mkBtn(`${alreadyDefault ? '保持' : '按'} ${fmtMoney(total)}`, 'primary', () => done(true)),
       ],
-      onClose: () => resolve(false),
+      onClose: () => {
+        if (!settled) {
+          settled = true;
+          resolve(false);
+        }
+      },
     });
   });
 }
@@ -855,7 +901,8 @@ function openEntryMenu(x, y, e) {
   item('添加付款截图', () => quickAddAttachment(e.id, 'payment_screenshot'));
   item('添加查验单', () => quickAddAttachment(e.id, 'inspection_pdf'));
   item('添加发票 PDF', () => quickAddAttachment(e.id, 'invoice_pdf'));
-  item('编辑备注', () => quickNoteFlow(e));
+  item('编辑条目备注', () => quickNoteFlow(e));
+  item('打标签', () => tagSelectionFlow([e.id]));
   item('删除条目', () => quickDelete(e), true);
   menu.style.left = Math.min(x, window.innerWidth - 190) + 'px';
   menu.style.top = Math.min(y, window.innerHeight - 260) + 'px';
@@ -872,13 +919,12 @@ async function quickNoteFlow(e) {
   const cur = (await Api.getEntry(e.id)).fields?.notes?.current || '';
   const body = el('div');
   body.innerHTML = `
-    <div class="hint">作为这条的记账备注。修改会留记录。</div>
     <div class="form-row" style="margin-top:14px">
-      <label>备注</label>
+      <label>条目备注</label>
       <textarea id="qnInput" rows="5" style="width:100%;font-family:inherit;font-size:13px;padding:10px;border-radius:9px;border:1px solid var(--line);resize:vertical">${esc(cur)}</textarea>
     </div>`;
   const m = modal({
-    title: '编辑备注', body,
+    title: '条目备注', body,
     footer: [
       mkBtn('取消', 'ghost', () => m.close()),
       mkBtn('保存', 'primary', async () => {
@@ -896,7 +942,7 @@ async function quickDelete(e) {
 
 // ------------------------------------------------------------------ 事件
 function bindEvents() {
-  $('#profilePill').onclick = () => openProfileManager(false);
+  if ($('#profilePill')) $('#profilePill').onclick = () => openProfileManager(false);
 
   $$('[data-view]').forEach((btn) => {
     btn.onclick = () => setQuickView(btn.dataset.view);
@@ -945,12 +991,9 @@ function bindEvents() {
   $('#emptyNew').onclick = () => openNewEntry();
   $('#actionImport').onclick = doImport;
 
-  $('#selectAllBtn').onclick = selectAllVisible;
-  $('#selectIncompleteBtn').onclick = () => selectVisibleWhere((e) => (e.completeness?.status || e.status) !== 'complete');
-  $('#selectWarningBtn').onclick = () => selectVisibleWhere((e) => e.check_status === 'warning' || e.check_status === 'blocked');
   $('#clearSelBtn').onclick = () => { State.suppressListAnimation = true; State.selected.clear(); State.lastSelectedId = null; renderEntries(); };
   $('#addToBatchBtn').onclick = addSelectionToBatch;
-  $('#tagBtn').onclick = tagSelectionFlow;
+  $('#tagBtn').onclick = () => tagSelectionFlow();
   $('#batchSummaryBtn').onclick = () => exportSummary([...State.selected]);
   $('#batchExportBtn').onclick = () => doExport([...State.selected]);
   $('#batchPrintBtn').onclick = () => openPrintDialog([...State.selected]);
@@ -983,6 +1026,7 @@ function bindEvents() {
     }
     if (e.key === '/') { e.preventDefault(); $('#filterKeyword').focus(); }
     else if (e.key.toLowerCase() === 'n') openNewEntry();
+    else if (e.key.toLowerCase() === 't' && State.selected.size) tagSelectionFlow();
     else if (e.key === 'Escape') { const m = $('#modalRoot'); if (m.lastChild) m.lastChild.remove(); }
     else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'a') { e.preventDefault(); selectAllVisible(); }
   });
@@ -1039,28 +1083,22 @@ function mkBtn(text, cls, onClick) {
   return b;
 }
 
-// ------------------------------------------------------------------ 身份管理
+// ------------------------------------------------------------------ 报账人管理
 function openProfileManager(forceCreate) {
   const wrap = el('div');
 
   function renderList() {
     const list = el('div', 'profile-list');
     if (!State.profiles.length) {
-      list.innerHTML = '<div class="hint">还没有身份。在下方创建第一个：填本人姓名与对应审核人。</div>';
+      list.innerHTML = '<div class="hint">还没有报账人。</div>';
       return list;
     }
     State.profiles.forEach((p) => {
       const row = el('div', 'profile-row');
-      const extra = [
-        p.student_id ? '学号 ' + esc(p.student_id) : '',
-        p.contact ? esc(p.contact) : '',
-        p.bank_name ? esc(p.bank_name) : '',
-        p.bank_card ? '尾号 ' + esc(String(p.bank_card).slice(-4)) : '',
-      ].filter(Boolean).join(' · ');
       row.innerHTML = `<div class="profile-row-main">
         <div class="profile-row-title"><b>${esc(p.name)}</b><span class="arrow">→</span>${esc(p.reviewer)}
           ${p.is_default ? ' <span class="badge pass">默认</span>' : ''}</div>
-        ${extra ? `<div class="profile-row-extra">${extra}</div>` : ''}
+        <div class="profile-row-extra">发票归属人</div>
       </div>`;
       const actions = el('div', 'profile-row-actions');
       actions.appendChild(mkBtn('编辑', 'small ghost', () => editProfileFlow(p, refreshProfileList)));
@@ -1080,61 +1118,48 @@ function openProfileManager(forceCreate) {
 
   const form = el('div');
   form.innerHTML = `
-    <h3 class="detail-section" style="margin:18px 0 10px"><span>新增身份</span><span class="h3-line"></span></h3>
+    <h3 class="detail-section" style="margin:18px 0 10px"><span>新增报账人</span><span class="h3-line"></span></h3>
     <div class="form-grid">
-      <div class="form-row"><label>本人姓名 *</label><input id="pfName" placeholder="必填"/></div>
-      <div class="form-row"><label>对应审核人 *</label><input id="pfReviewer" placeholder="必填"/></div>
-      <div class="form-row"><label>学号</label><input id="pfStudent"/></div>
-      <div class="form-row"><label>电话</label><input id="pfContact"/></div>
-      <div class="form-row"><label>开户行</label><input id="pfBank"/></div>
-      <div class="form-row"><label>卡号</label><input id="pfCard"/></div>
+      <div class="form-row"><label>姓名 *</label><input id="pfName" placeholder="必填"/></div>
+      <div class="form-row"><label>审核人 *</label><input id="pfReviewer" placeholder="必填"/></div>
     </div>
-    <div class="hint" style="margin-top:4px">学号 / 电话 / 银行信息供打印导出组件使用，可留空。</div>`;
+    `;
 
   wrap.appendChild(renderList());
   wrap.appendChild(form);
 
-  const addBtn = mkBtn('添加身份', 'primary', async () => {
+  const addBtn = mkBtn('添加报账人', 'primary', async () => {
     const name = form.querySelector('#pfName').value.trim();
     const reviewer = form.querySelector('#pfReviewer').value.trim();
     if (!name || !reviewer) { toast('姓名与审核人必填', 'err'); return; }
     try {
       await Api.createProfile(name, reviewer, State.profiles.length === 0, {
-        student_id: form.querySelector('#pfStudent').value.trim(),
-        contact: form.querySelector('#pfContact').value.trim(),
-        bank_name: form.querySelector('#pfBank').value.trim(),
-        bank_card: form.querySelector('#pfCard').value.trim(),
       });
       await loadProfiles();
       refreshProfileList();
-      ['pfName', 'pfReviewer', 'pfStudent', 'pfContact', 'pfBank', 'pfCard'].forEach((id) => { form.querySelector('#' + id).value = ''; });
-      toast('身份已添加', 'ok');
+      ['pfName', 'pfReviewer'].forEach((id) => { form.querySelector('#' + id).value = ''; });
+      toast('报账人已添加', 'ok');
     } catch (e) { toast(e.message, 'err'); }
   });
 
   const m = modal({
-    title: '身份管理',
-    subhead: '本人姓名 + 审核人写入导出；一个人可存多个身份，主界面一键切换',
+    title: '报账人管理',
     wide: true,
     body: wrap,
     footer: [addBtn, mkBtn('关闭', 'ghost', () => m.close())],
   });
 }
 
-// 编辑已有身份（后端 update_profile 支持全部字段）
+// 编辑已有报账人（后端 update_profile 支持全部字段）
 function editProfileFlow(p, onDone) {
   const body = el('div');
   body.innerHTML = `
     <div class="form-grid">
-      <div class="form-row"><label>本人姓名 *</label><input id="epName" value="${esc(p.name)}"/></div>
-      <div class="form-row"><label>对应审核人 *</label><input id="epReviewer" value="${esc(p.reviewer)}"/></div>
-      <div class="form-row"><label>学号</label><input id="epStudent" value="${esc(p.student_id || '')}"/></div>
-      <div class="form-row"><label>电话</label><input id="epContact" value="${esc(p.contact || '')}"/></div>
-      <div class="form-row"><label>开户行</label><input id="epBank" value="${esc(p.bank_name || '')}"/></div>
-      <div class="form-row"><label>卡号</label><input id="epCard" value="${esc(p.bank_card || '')}"/></div>
+      <div class="form-row"><label>姓名 *</label><input id="epName" value="${esc(p.name)}"/></div>
+      <div class="form-row"><label>审核人 *</label><input id="epReviewer" value="${esc(p.reviewer)}"/></div>
     </div>`;
   const m = modal({
-    title: '编辑身份', body,
+    title: '编辑报账人', body,
     footer: [mkBtn('取消', 'ghost', () => m.close()), mkBtn('保存', 'primary', async () => {
       const name = body.querySelector('#epName').value.trim();
       const reviewer = body.querySelector('#epReviewer').value.trim();
@@ -1142,10 +1167,6 @@ function editProfileFlow(p, onDone) {
       try {
         await Api.updateProfile(p.id, {
           name, reviewer,
-          student_id: body.querySelector('#epStudent').value.trim(),
-          contact: body.querySelector('#epContact').value.trim(),
-          bank_name: body.querySelector('#epBank').value.trim(),
-          bank_card: body.querySelector('#epCard').value.trim(),
         });
         await loadProfiles();
         m.close(); if (onDone) onDone();
@@ -1156,11 +1177,27 @@ function editProfileFlow(p, onDone) {
 }
 
 async function openSettings() {
-  let paths, printStatus, appInfo;
+  let paths, printStatus, appInfo, operatorPrefs, multiMode;
   try {
     paths = await Api.dataRoot();
     printStatus = await Api.printComponentStatus();
     appInfo = await Api.appInfo();
+    const prefValues = await Promise.all([
+      Api.appPreference(OPERATOR_PREF_KEYS.name, ''),
+      Api.appPreference(OPERATOR_PREF_KEYS.student_id, ''),
+      Api.appPreference(OPERATOR_PREF_KEYS.contact, ''),
+      Api.appPreference(OPERATOR_PREF_KEYS.bank_name, ''),
+      Api.appPreference(OPERATOR_PREF_KEYS.bank_card, ''),
+      Api.appPreference(MULTI_CLAIMANT_KEY, State.multiClaimantMode ? '1' : '0'),
+    ]);
+    operatorPrefs = {
+      name: prefValues[0],
+      student_id: prefValues[1],
+      contact: prefValues[2],
+      bank_name: prefValues[3],
+      bank_card: prefValues[4],
+    };
+    multiMode = prefValues[5] === '1';
   } catch (e) { toast(e.message, 'err'); return; }
   const body = el('div');
 
@@ -1175,15 +1212,38 @@ async function openSettings() {
 
   body.innerHTML = `
     <div class="settings-shell">
-      <!-- 身份 -->
+      <!-- 报账人 -->
       <div class="settings-block">
         <div class="settings-row" id="setProfiles">
           <div class="settings-row-copy">
-            <b>身份信息</b>
-            <span>${profileCount ? `${profileCount} 个身份${defaultProfile ? ' · 默认 ' + esc(defaultProfile.name) + ' → ' + esc(defaultProfile.reviewer) : ''}` : '尚未创建身份'}</span>
+            <b>报账人</b>
+            <span>${profileCount ? `${profileCount} 个${defaultProfile ? ' · 默认 ' + esc(defaultProfile.name) : ''}` : '0 个'}</span>
           </div>
-          <button class="btn small">管理</button>
+          <button class="btn small" id="setProfilesManage">管理</button>
         </div>
+        <div class="settings-row">
+          <div class="settings-row-copy">
+            <b>代填模式</b>
+            <span>新建/导入时选择报账人</span>
+          </div>
+          <label class="switch-line"><input type="checkbox" id="setMultiClaimant" ${multiMode ? 'checked' : ''}/><span>开启</span></label>
+        </div>
+      </div>
+
+      <div class="settings-block">
+        <details class="settings-advanced" id="paymentInfoFold">
+          <summary>收款信息</summary>
+          <div class="form-grid settings-form-grid">
+            <div class="form-row"><label>姓名</label><input id="opName" value="${esc(operatorPrefs.name)}"/></div>
+            <div class="form-row"><label>学号</label><input id="opStudent" value="${esc(operatorPrefs.student_id)}"/></div>
+            <div class="form-row"><label>电话</label><input id="opContact" value="${esc(operatorPrefs.contact)}"/></div>
+            <div class="form-row"><label>开户行</label><input id="opBank" value="${esc(operatorPrefs.bank_name)}"/></div>
+            <div class="form-row"><label>卡号</label><input id="opCard" value="${esc(operatorPrefs.bank_card)}"/></div>
+          </div>
+          <div class="settings-row-actions">
+            <button class="btn small" id="setSaveOperator">保存身份</button>
+          </div>
+        </details>
       </div>
 
       <!-- 偏好 -->
@@ -1283,8 +1343,36 @@ async function openSettings() {
     $('#entryList').dataset.density = State.density;
     toast('已保存', 'ok');
   };
+  body.querySelector('#setMultiClaimant').onchange = async (ev) => {
+    const value = ev.target.checked ? '1' : '0';
+    State.multiClaimantMode = value === '1';
+    localStorage.setItem(MULTI_CLAIMANT_KEY, value);
+    try {
+      await Api.setAppPreference(MULTI_CLAIMANT_KEY, value);
+      toast('已保存', 'ok');
+    } catch (e) { toast(e.message, 'err'); }
+  };
+  body.querySelector('#setSaveOperator').onclick = async () => {
+    const values = {
+      name: body.querySelector('#opName').value.trim(),
+      student_id: body.querySelector('#opStudent').value.trim(),
+      contact: body.querySelector('#opContact').value.trim(),
+      bank_name: body.querySelector('#opBank').value.trim(),
+      bank_card: body.querySelector('#opCard').value.trim(),
+    };
+    try {
+      await Promise.all([
+        Api.setAppPreference(OPERATOR_PREF_KEYS.name, values.name),
+        Api.setAppPreference(OPERATOR_PREF_KEYS.student_id, values.student_id),
+        Api.setAppPreference(OPERATOR_PREF_KEYS.contact, values.contact),
+        Api.setAppPreference(OPERATOR_PREF_KEYS.bank_name, values.bank_name),
+        Api.setAppPreference(OPERATOR_PREF_KEYS.bank_card, values.bank_card),
+      ]);
+      toast('已保存', 'ok');
+    } catch (e) { toast(e.message, 'err'); }
+  };
 
-  body.querySelector('#setProfiles').onclick = () => { m.close(); openProfileManager(false); };
+  body.querySelector('#setProfilesManage').onclick = () => { m.close(); openProfileManager(false); };
   body.querySelector('#setUpdate').onclick = () => { m.close(); openUpdateDialog(); };
   body.querySelector('#setGuide').onclick = () => { m.close(); openUsageGuide(false); };
   body.querySelector('#setRepo').onclick = () => Api.openExternalUrl(appInfo.repository).catch((e) => toast(e.message, 'err'));
@@ -1415,11 +1503,11 @@ function openUsageGuide(firstRun) {
       </div>
       <div>
         <b>3. 筛选检查</b>
-        <span>用待补材料、需确认、抬头、报账人缩小范围。</span>
+        <span>用待补材料、识别提醒、抬头、报账人缩小范围。</span>
       </div>
       <div>
         <b>4. 批量处理</b>
-        <span>先选当前列表或异常条目，再汇总、导出、打印或装入批次。</span>
+        <span>框选或用快捷键选中条目后，再汇总、导出、打印或装入批次。</span>
       </div>
     </div>`;
   const m = modal({
@@ -1437,7 +1525,7 @@ function openUsageGuide(firstRun) {
 
 // ------------------------------------------------------------------ 新建条目
 function openNewEntry() {
-  if (!State.currentProfileId) { toast('请先创建身份', 'err'); openProfileManager(true); return; }
+  if (!State.currentProfileId) { toast('请先创建报账人', 'err'); openProfileManager(true); return; }
 
   const picked = { xml: null, pdf: null, payments: [], inspection: null };
   const body = el('div');
@@ -1462,6 +1550,7 @@ function openNewEntry() {
         <option value="北京理工大学教育基金会">北京理工大学教育基金会</option>
       </select>
     </div>
+    ${claimantConfirmHtml()}
     <div class="upload-grid">
       ${uploadTile('pdf', '发票 PDF', '推荐上传', '选择文件', utIco(iconPdf()))}
       ${uploadTile('xml', '发票 XML', '让识别更准', '选择文件', utIco(iconXml()))}
@@ -1524,7 +1613,7 @@ function openNewEntry() {
   const create = async () => {
     try {
       await Api.createEntry({
-        profileId: State.currentProfileId,
+        profileId: selectedClaimantId(body),
         title: body.querySelector('#neTitle').value,
         xmlPath: picked.xml, pdfPath: picked.pdf,
         paymentPaths: picked.payments, inspectionPath: picked.inspection,
@@ -1549,7 +1638,7 @@ function openNewEntry() {
 
 // ------------------------------------------------------------------ 批量导入
 async function openBatchImport() {
-  if (!State.currentProfileId) { toast('请先选择报账人', 'err'); return; }
+  if (!State.currentProfileId) { toast('请先创建报账人', 'err'); openProfileManager(true); return; }
   const body = el('div');
   body.innerHTML = `
     <div class="import-choice-grid">
@@ -1652,6 +1741,7 @@ function openBatchImportPreview(scan, sourceLabel) {
         <div><span>跳过</span><b>${ignored.length + ungrouped.length}</b></div>
       </div>
       <div class="hint" style="margin-top:12px">从 <b>${esc(sourceLabel)}</b> 扫描到 <b>${scan.total_files}</b> 个候选文件。每个发票 PDF 创建一条；XML 只在能匹配到 PDF 时一起带入。</div>
+      ${claimantConfirmHtml()}
       <div class="bi-groups" style="margin-top:14px">${groupRows}</div>
       ${ungroupedRows}
       ${ignoredRows}`;
@@ -1680,7 +1770,7 @@ function openBatchImportPreview(scan, sourceLabel) {
           .map((g) => ({ label: g.label, files: g.files.map((f) => ({ path: f.path, type: f.type })) }));
         if (!payload.length) { toast('没有可创建的分组', 'err'); return; }
         try {
-          const r = await Api.batchCreateEntries(State.currentProfileId, payload);
+          const r = await Api.batchCreateEntries(selectedClaimantId(body), payload);
           await cleanupDroppedPaths(selectedImportPaths());
           m.close();
           await refreshEntries();
@@ -1737,7 +1827,7 @@ async function openEntryDetail(entryId) {
           <select class="attach-type-select" data-att-type="${a.id}">
             ${ATTACHMENT_TYPE_OPTS.map(([v, l]) => `<option value="${v}"${v === a.type ? ' selected' : ''}>${l}</option>`).join('')}
           </select>
-          <input class="attach-note" data-att-note="${a.id}" value="${esc(a.note || '')}" placeholder="备注"/>
+          <input class="attach-note" data-att-note="${a.id}" value="${esc(a.note || '')}" placeholder="附件备注"/>
           <button class="btn small ghost" data-open-att="${a.id}">打开</button>
           <button class="btn small ghost" data-reveal-att="${a.id}">位置</button>
           <button class="btn small ghost" data-replace-att="${a.id}">替换</button>
@@ -1800,7 +1890,8 @@ async function openEntryDetail(entryId) {
           ${lockedKV('销售方', 'seller', e.seller)}
           ${lockedKV('价税合计', 'total', e.total, true, true)}
           ${lockedKV('购买方', 'buyer_name', e.buyer_name)}
-          <span class="k">报账人</span><span>${esc(owner ? owner.name : '—')} → ${esc(owner ? owner.reviewer : '—')}</span>
+          <span class="k">报账人</span>
+          <span><select class="detail-profile-select" id="deProfile">${profileOptionsHtml(e.profile_id)}</select></span>
         </div>
         ${e.check_message ? `<p class="hint warn compact-hint">${esc(e.check_message)}</p>` : ''}
       </div>
@@ -1811,7 +1902,7 @@ async function openEntryDetail(entryId) {
           ${editRow('实付金额', 'paid_amount', f.paid_amount)}
           ${editRow('实际物资名称', 'actual_item_name', f.actual_item_name)}
         </div>
-        ${editRow('备注', 'notes', f.notes, true)}
+        ${editRow('条目备注', 'notes', f.notes, true)}
         ${compLine}
       </div>
     </div>
@@ -1867,6 +1958,15 @@ async function openEntryDetail(entryId) {
     toast('材料已添加', 'ok');
     mm.close(); openEntryDetail(entryId); await refreshEntries();
   });
+
+  // ---- editable fields (paid_amount, actual_item_name, notes)
+  body.querySelector('#deProfile').onchange = async (ev) => {
+    try {
+      await Api.updateEntryProfile(entryId, ev.target.value, State.currentProfileId);
+      toast('报账人已更新', 'ok');
+      mm.close(); openEntryDetail(entryId); await refreshEntries();
+    } catch (err) { toast(err.message, 'err'); }
+  };
 
   // ---- editable fields (paid_amount, actual_item_name, notes)
   body.querySelectorAll('[data-edit]').forEach((inp) => {
@@ -2254,7 +2354,7 @@ function hideDragOverlay() {
 async function openAttachDroppedFiles(paths) {
   if (!State.currentProfileId) {
     await cleanupDroppedPaths(paths);
-    toast('请先选择报账人', 'err');
+    toast('请先创建报账人', 'err');
     return;
   }
   let entries = [];
@@ -2437,11 +2537,18 @@ function showExportResult(outputs) {
     <div class="attach-item">
       <span class="attach-name" title="${esc(o.path)}">${esc(baseName(o.path))}</span>
       <button class="btn small ghost" data-open-export="${esc(o.path)}">打开</button>
+      <button class="btn small ghost" data-open-export-dir="${esc(dirName(o.path))}">文件夹</button>
     </div>`).join('');
   body.innerHTML = `<div class="hint">已生成以下文件。</div><div class="attach-list" style="margin-top:12px">${rows}</div>`;
   body.querySelectorAll('[data-open-export]').forEach((btn) => {
     btn.onclick = async () => {
       try { await Api.openPath(btn.dataset.openExport); }
+      catch (e) { toast(e.message, 'err'); }
+    };
+  });
+  body.querySelectorAll('[data-open-export-dir]').forEach((btn) => {
+    btn.onclick = async () => {
+      try { await Api.openPath(btn.dataset.openExportDir); }
       catch (e) { toast(e.message, 'err'); }
     };
   });
@@ -2453,7 +2560,7 @@ function showExportResult(outputs) {
 }
 
 async function doImport() {
-  if (!State.currentProfileId) { toast('请先创建身份', 'err'); return; }
+  if (!State.currentProfileId) { toast('请先创建报账人', 'err'); return; }
   try {
     const res = await Api.pickFiles(false, ['绑定包 (*.tidoc)']);
     const paths = res.paths || [];
@@ -2486,53 +2593,33 @@ async function openPrintDialog(ids) {
     return;
   }
 
-  const byTitle = {};
-  State.entries.filter((e) => ids.includes(e.id)).forEach((e) => {
-    const t = e.title || '未标注抬头';
-    byTitle[t] = (byTitle[t] || 0) + 1;
-  });
-  const titleSummary = Object.entries(byTitle).map(([t, n]) => `${TITLE_SHORT[t] || t}：${n} 条`).join('　·　');
-
-  const ANNO = [
-    ['invoice_no', '发票号'], ['person_name', '报账人'], ['paid_amount', '实付金额'],
-    ['invoice_date', '日期'], ['seller', '销售方'], ['total', '价税合计'],
-  ];
   const OUTPUTS = [
     ['make_invoice_pdf', '发票拼接 PDF'], ['make_payment_pdf', '付款截图拼接 PDF'],
     ['make_inspection_pdf', '查验单拼接 PDF'], ['make_reimburse_doc', '报账说明 Word'],
     ['make_acceptance_doc', '验收单 Word'],
   ];
-  const defaultAnno = ['invoice_no', 'person_name', 'paid_amount'];
 
   const body = el('div');
   body.innerHTML = `
-    <div class="hint">共 ${ids.length} 条。两个抬头会分开输出到各自文件夹，不混合。${esc(titleSummary)}</div>
-    <div class="detail-section" style="margin-top:16px">
-      <h3>生成内容<span class="h3-line"></span></h3>
+    <div class="detail-section">
       <div class="check-grid">
         ${OUTPUTS.map(([k, label]) => `<label class="chk"><input type="checkbox" data-out="${k}" checked/> ${label}</label>`).join('')}
-      </div>
-    </div>
-    <div class="detail-section">
-      <h3>拼接页叠加信息（勾选要标注的字段）<span class="h3-line"></span></h3>
-      <div class="check-grid">
-        ${ANNO.map(([k, label]) => `<label class="chk"><input type="checkbox" data-anno="${k}"${defaultAnno.includes(k) ? ' checked' : ''}/> ${label}</label>`).join('')}
       </div>
     </div>
     <div class="form-grid">
       <div class="form-row"><label>文档日期</label><input id="pDate" placeholder="如 2026年7月5日"/></div>
       <div class="form-row"><label>存放地点</label><input id="pLoc" value="工训楼"/></div>
+      <div class="form-row"><label>批次备注</label><input id="pNote" placeholder="可选"/></div>
     </div>`;
 
   const genBtn = mkBtn('生成打印件', 'primary', async () => {
     const options = {};
     body.querySelectorAll('[data-out]').forEach((c) => { options[c.dataset.out] = c.checked; });
-    const annoFields = [...body.querySelectorAll('[data-anno]:checked')].map((c) => c.dataset.anno);
-    options.annotate = annoFields.length > 0;
-    options.annotation_fields = annoFields;
+    options.annotate = true;
     const date = body.querySelector('#pDate').value.trim();
     if (date) options.document_date = date;
     options.storage_location = body.querySelector('#pLoc').value.trim() || '工训楼';
+    options.batch_note = body.querySelector('#pNote').value.trim();
 
     genBtn.disabled = true; genBtn.textContent = '生成中…';
     try {
@@ -2548,7 +2635,6 @@ async function openPrintDialog(ids) {
 
   const m = modal({
     title: '打印导出',
-    subhead: '两个抬头分开输出 · 可勾选要标注的字段',
     wide: true, body,
     footer: [mkBtn('取消', 'ghost', () => m.close()), genBtn],
   });
@@ -2561,10 +2647,11 @@ function showPrintResult(results) {
   };
   const html = (results || []).map((g) => {
     const tcls = TITLE_CLASS[g.title] || '';
+    const firstPath = Object.values(g.files || {})[0] || '';
     const files = Object.entries(g.files).map(([k, v]) =>
       `<div class="attach-item"><span class="attach-type">${OUT_LABEL[k] || k}</span><span style="flex:1" title="${esc(v)}">${esc(baseName(v))}</span></div>`).join('');
     return `<div class="detail-section">
-      <h3>${tcls ? `<span class="title-chip ${tcls}">${esc(TITLE_SHORT[g.title] || g.title)}</span>` : esc(g.title || '未标注抬头')}<span class="h3-line"></span></h3>
+      <h3>${tcls ? `<span class="title-chip ${tcls}">${esc(TITLE_SHORT[g.title] || g.title)}</span>` : esc(g.title || '未标注抬头')}<span class="h3-line"></span>${firstPath ? `<button class="btn small ghost" data-open-print-dir="${esc(dirName(firstPath))}">文件夹</button>` : ''}</h3>
       <div class="attach-list">${files || '<span style="color:var(--ink-soft)">无文件</span>'}</div>
     </div>`;
   }).join('');
@@ -2574,6 +2661,12 @@ function showPrintResult(results) {
     wide: true,
     body: html || '<div class="hint">无生成结果。</div>',
     footer: [mkBtn('完成', 'primary', () => m.close())],
+  });
+  m.body.querySelectorAll('[data-open-print-dir]').forEach((btn) => {
+    btn.onclick = async () => {
+      try { await Api.openPath(btn.dataset.openPrintDir); }
+      catch (e) { toast(e.message, 'err'); }
+    };
   });
 }
 

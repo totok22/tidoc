@@ -127,6 +127,8 @@ def build_prints(
             f"打印导出组件未安装或缺少依赖：{', '.join(status['missing'])}。"
         )
 
+    options = dict(options or {})
+    operator_profile = options.pop("operator_profile", {}) or {}
     profiles = {p["id"]: p for p in profiles_repo.list()}
     print_entries = []
     person_profiles: dict[str, dict] = {}
@@ -142,13 +144,14 @@ def build_prints(
         )
         print_entries.append(pe)
         entry_key = pe["entry_id"] if isinstance(pe, dict) else pe.entry_id
-        person_profiles[entry_key] = {
-            "person_name": prof.get("name", ""),
-            "student_id": prof.get("student_id", ""),
-            "contact": prof.get("contact", ""),
-            "bank_name": prof.get("bank_name", ""),
-            "bank_card": prof.get("bank_card", ""),
+        print_person = {
+            "person_name": operator_profile.get("person_name") or prof.get("name", ""),
+            "student_id": operator_profile.get("student_id") or prof.get("student_id", ""),
+            "contact": operator_profile.get("contact") or prof.get("contact", ""),
+            "bank_name": operator_profile.get("bank_name") or prof.get("bank_name", ""),
+            "bank_card": operator_profile.get("bank_card") or prof.get("bank_card", ""),
         }
+        person_profiles[entry_key] = print_person
 
     if not print_entries:
         raise RuntimeError("没有可打印的条目。")

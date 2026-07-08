@@ -80,20 +80,10 @@
               <option value="">全部</option>
             </select>
           </label>
-          <div class="profile-switch inline">
-            <button class="profile-pill" id="profilePill" title="切换 / 管理身份">
-              <span class="profile-avatar" id="profileAvatar">—</span>
-              <span class="profile-meta">
-                <span class="profile-name" id="profileName">未选择</span>
-                <span class="profile-reviewer" id="profileReviewer"></span>
-              </span>
-              <svg class="chev" viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="m6 9 6 6 6-6" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linecap="round"/></svg>
-            </button>
-          </div>
           <div class="view-presets" id="viewPresets" role="group" aria-label="状态">
             <button class="preset-btn active" data-view="all">全部</button>
             <button class="preset-btn" data-view="incomplete">待补材料</button>
-            <button class="preset-btn" data-view="warning">需确认</button>
+            <button class="preset-btn" data-view="warning">识别提醒</button>
             <button class="preset-btn" data-view="modified">已修改</button>
             <button class="preset-btn" data-view="complete">齐备</button>
           </div>
@@ -144,18 +134,18 @@
             <select id="filterCheck">
               <option value="">全部</option>
               <option value="pass">通过</option>
-              <option value="warning">需确认</option>
-              <option value="blocked">问题严重</option>
+              <option value="warning">识别提醒</option>
+              <option value="blocked">严重问题</option>
             </select>
           </div>
           <div class="adv-field">
-            <label>标签</label>
+            <label>条目标签</label>
             <select id="filterTag">
               <option value="">全部</option>
             </select>
           </div>
           <div class="adv-field">
-            <label>备注</label>
+            <label>条目备注</label>
             <select id="filterNotes">
               <option value="">全部</option>
               <option value="yes">有备注</option>
@@ -179,16 +169,11 @@
 
         <div class="content-head">
           <div class="stats" id="stats"></div>
-          <div class="select-tools" id="selectTools">
-            <button class="btn small" id="selectAllBtn">选当前列表</button>
-            <button class="btn small ghost" id="selectIncompleteBtn">选待补</button>
-            <button class="btn small ghost" id="selectWarningBtn">选需确认</button>
-          </div>
           <div class="selection-bar hidden" id="selectionBar">
             <span id="selCount">已选 0</span>
             <button class="btn small ghost" id="clearSelBtn">取消</button>
             <button class="btn small ghost" id="addToBatchBtn">装入批次</button>
-            <button class="btn small ghost" id="tagBtn">打标签</button>
+            <button class="btn small ghost" id="tagBtn">标签</button>
             <button class="btn small ghost" id="batchSummaryBtn">汇总</button>
             <button class="btn small ghost" id="batchExportBtn">导出</button>
             <button class="btn small ghost" id="batchPrintBtn">打印</button>

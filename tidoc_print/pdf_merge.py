@@ -1,8 +1,8 @@
 """PDF 拼接与付款截图转 PDF（设计文档第 9 节）。
 
 - merge_pdfs：把多个 PDF（发票 / 查验单）拼成一份。
-- images_to_pdf：把付款截图（jpg/png）逐张转成 PDF 页并拼接，可在每页叠加信息。
-- 页面信息标注：在每页页脚叠加发票信息、姓名、实付金额、发票号等（字段可勾选）。
+- images_to_pdf：把付款截图（jpg/png）按横版 A4、每页两张拼接。
+- 页面信息标注：只保留份数 / 页码编号，减少遮挡。
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ from pathlib import Path
 
 from pypdf import PdfReader, PdfWriter
 from PIL import Image
-from reportlab.lib.pagesizes import A4
+from reportlab.lib.pagesizes import A4, landscape
 from reportlab.lib.units import mm
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.cidfonts import UnicodeCIDFont
@@ -27,33 +27,41 @@ except Exception:
     _FONT_OK = False
 
 
+def _footer_text(batch_note: str, text: str) -> str:
+    batch_note = (batch_note or "").strip()
+    return f"{batch_note}  {text}" if batch_note else text
+
+
 def _annotation_overlay(text: str, pagesize=A4) -> PdfReader:
     """生成一张只含页脚标注文字的透明 PDF 页，供叠加。"""
     buf = io.BytesIO()
     c = canvas.Canvas(buf, pagesize=pagesize)
     width, _ = pagesize
-    c.setFont(_CJK_FONT if _FONT_OK else "Helvetica", 9)
+    c.setFont(_CJK_FONT if _FONT_OK else "Helvetica", 8)
     c.setFillColorRGB(0.1, 0.1, 0.1)
-    # 页脚左下角，留 12mm 边距
-    c.drawString(12 * mm, 8 * mm, text)
+    c.drawRightString(width - 10 * mm, 7 * mm, text)
     c.save()
     buf.seek(0)
     return PdfReader(buf)
 
 
 def merge_pdfs(pdf_paths: list[str | Path], out_path: str | Path,
-               annotations: list[str] | None = None) -> Path:
-    """把多个 PDF 拼成一份。annotations 若给出，逐文件在其每页页脚叠加对应文字。"""
+               annotations: list[str] | None = None,
+               numbered: bool = False,
+               batch_note: str = "") -> Path:
+    """把多个 PDF 拼成一份。numbered=True 时每页右下角标「第 N 份-P/T」。"""
     writer = PdfWriter()
     for idx, pdf_path in enumerate(pdf_paths):
         reader = PdfReader(str(pdf_path))
         note = annotations[idx] if annotations and idx < len(annotations) else ""
-        for page in reader.pages:
+        total_pages = len(reader.pages)
+        for page_idx, page in enumerate(reader.pages, start=1):
             # 先把页加进 writer，再对 writer 内的页做叠加（pypdf 推荐做法，避免不可靠）
             added = writer.add_page(page)
-            if note:
+            label = _footer_text(batch_note, f"第{idx + 1}份-{page_idx}/{total_pages}") if numbered else note
+            if label:
                 box = added.mediabox
-                overlay = _annotation_overlay(note, (float(box.width), float(box.height)))
+                overlay = _annotation_overlay(label, (float(box.width), float(box.height)))
                 added.merge_page(overlay.pages[0])
     out_path = Path(out_path)
     with out_path.open("wb") as f:
@@ -62,32 +70,43 @@ def merge_pdfs(pdf_paths: list[str | Path], out_path: str | Path,
 
 
 def images_to_pdf(image_paths: list[str | Path], out_path: str | Path,
-                  annotations: list[str] | None = None) -> Path:
-    """把付款截图逐张放到 A4 页并拼成 PDF，每页可在页脚叠加信息。"""
+                  annotations: list[str] | None = None,
+                  batch_note: str = "") -> Path:
+    """把付款截图按横版 A4、每页两张拼成 PDF。"""
     writer = PdfWriter()
-    page_w, page_h = A4
-    for idx, img_path in enumerate(image_paths):
+    page_w, page_h = landscape(A4)
+    margin = 10 * mm
+    gap = 8 * mm
+    footer_h = 10 * mm
+    slot_w = (page_w - 2 * margin - gap) / 2
+    slot_h = page_h - 2 * margin - footer_h
+    from reportlab.lib.utils import ImageReader
+
+    for page_index, start in enumerate(range(0, len(image_paths), 2), start=1):
         buf = io.BytesIO()
-        c = canvas.Canvas(buf, pagesize=A4)
-        with Image.open(img_path) as im:
-            im = im.convert("RGB")
-            iw, ih = im.size
-            # 等比缩放，留边距
-            margin = 15 * mm
-            max_w, max_h = page_w - 2 * margin, page_h - 2 * margin - 10 * mm
-            scale = min(max_w / iw, max_h / ih)
-            draw_w, draw_h = iw * scale, ih * scale
-            x = (page_w - draw_w) / 2
-            y = (page_h - draw_h) / 2 + 5 * mm
-            tmp = io.BytesIO()
-            im.save(tmp, format="PNG")
-            tmp.seek(0)
-            from reportlab.lib.utils import ImageReader
-            c.drawImage(ImageReader(tmp), x, y, width=draw_w, height=draw_h)
-        note = annotations[idx] if annotations and idx < len(annotations) else ""
-        if note:
-            c.setFont(_CJK_FONT if _FONT_OK else "Helvetica", 9)
-            c.drawString(12 * mm, 8 * mm, note)
+        c = canvas.Canvas(buf, pagesize=(page_w, page_h))
+        for offset, img_path in enumerate(image_paths[start:start + 2]):
+            idx = start + offset
+            with Image.open(img_path) as im:
+                im = im.convert("RGB")
+                iw, ih = im.size
+                scale = min(slot_w / iw, slot_h / ih)
+                draw_w, draw_h = iw * scale, ih * scale
+                slot_x = margin + offset * (slot_w + gap)
+                x = slot_x + (slot_w - draw_w) / 2
+                y = margin + footer_h + (slot_h - draw_h) / 2
+                tmp = io.BytesIO()
+                im.save(tmp, format="PNG")
+                tmp.seek(0)
+                c.drawImage(ImageReader(tmp), x, y, width=draw_w, height=draw_h)
+            note = annotations[idx] if annotations and idx < len(annotations) else ""
+            if note:
+                c.setFont(_CJK_FONT if _FONT_OK else "Helvetica", 8)
+                c.setFillColorRGB(0.1, 0.1, 0.1)
+                c.drawRightString(slot_x + slot_w, margin + 3 * mm, note)
+        c.setFont(_CJK_FONT if _FONT_OK else "Helvetica", 8)
+        c.setFillColorRGB(0.1, 0.1, 0.1)
+        c.drawRightString(page_w - margin, 6 * mm, _footer_text(batch_note, f"第{page_index}页"))
         c.save()
         buf.seek(0)
         for page in PdfReader(buf).pages:
