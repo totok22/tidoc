@@ -50,14 +50,31 @@ def _install_native_stderr_filter() -> None:
     threading.Thread(target=pump, daemon=True).start()
 
 
+def web_dir() -> Path:
+    """Return the frontend resource directory in source and PyInstaller builds."""
+    candidates: list[Path] = []
+    bundle_root = getattr(sys, "_MEIPASS", "")
+    if bundle_root:
+        root = Path(bundle_root)
+        candidates.extend((root / "tidoc" / "web", root / "web"))
+    candidates.extend((
+        WEB_DIR,
+        Path(sys.executable).resolve().parent / "tidoc" / "web",
+    ))
+    for path in candidates:
+        if (path / "index.html").is_file():
+            return path
+    return candidates[0]
+
+
 def main() -> None:
     _install_native_stderr_filter()
     from .db.paths import resolve_data_root
     api = Api(resolve_data_root())
-    index = WEB_DIR / "index.html"
+    index = web_dir() / "index.html"
     window = webview.create_window(
         "tidoc",
-        url=str(index),
+        url=index.as_uri(),
         js_api=api,
         width=1160,
         height=780,

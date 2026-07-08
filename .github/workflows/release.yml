@@ -103,8 +103,12 @@ jobs:
       - name: Create DMG
         run: |
           mkdir -p release
-          hdiutil create -volname "tidoc" \
-            -srcfolder "dist/tidoc.app" \
+          rm -rf dmg-root
+          mkdir -p dmg-root
+          cp -R "dist/tidoc.app" "dmg-root/tidoc.app"
+          ln -s /Applications "dmg-root/Applications"
+          hdiutil create -volname "Tidoc" \
+            -srcfolder "dmg-root" \
             -ov -format UDZO "release/tidoc-core-macos-v${VERSION}.dmg"
 
       - name: Install print dependencies
