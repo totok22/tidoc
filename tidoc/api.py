@@ -24,11 +24,6 @@ from .db import (
     EntryRepo,
     ProfileRepo,
 )
-from .engine import check_invoice, parse_invoice_files
-from .services import export_bindle, import_bindle, inspect_bindle, scan_files, scan_folder
-from .services.exports import export_attachment_zip, export_overview_xlsx
-from .services.summary import build_summary
-
 
 def _guard(func):
     """把返回值包成 {ok:True,...}，异常包成 {ok:False,error:...}。"""
@@ -85,6 +80,8 @@ class Api:
     @_guard
     def parse_files(self, xml_path=None, pdf_path=None):
         """先解析、不落库，供前端预览识别结果与校验。"""
+        from .engine import check_invoice, parse_invoice_files
+
         parsed = parse_invoice_files(xml_path, pdf_path)
         check = check_invoice(parsed)
         return {"parsed": parsed.to_dict(), "check": check.to_dict()}
@@ -93,6 +90,8 @@ class Api:
     def create_entry(self, profile_id, title="", xml_path=None, pdf_path=None,
                      payment_paths=None, inspection_path=None, status="draft"):
         """从上传文件创建条目：解析 → 校验 → 落库 → 复制附件。"""
+        from .engine import check_invoice, parse_invoice_files
+
         parsed = None
         if xml_path or pdf_path:
             parsed = parse_invoice_files(xml_path, pdf_path)
@@ -119,11 +118,15 @@ class Api:
     @_guard
     def scan_folder(self, folder):
         """扫描目录，按发票 PDF 生成批量导入预览。"""
+        from .services.folder_import import scan_folder
+
         return scan_folder(folder)
 
     @_guard
     def scan_files(self, paths):
         """扫描多选或拖入的发票文件，按发票 PDF 生成批量导入预览。"""
+        from .services.folder_import import scan_files
+
         return scan_files(paths or [])
 
     @_guard
@@ -166,7 +169,9 @@ class Api:
         groups: [{"files": [{"path", "type"}...]}...]
         每组必须有发票 PDF，可附带 XML。付款截图 / 查验单在条目内添加。
         """
+        from .engine import check_invoice, parse_invoice_files
         from .db import TYPE_INVOICE_PDF, TYPE_INVOICE_XML
+
         created, failed = [], []
         for g in (groups or []):
             files = g.get("files") or []
@@ -360,10 +365,14 @@ class Api:
     # ------------------------------------------------------------ 汇总 / 绑定包
     @_guard
     def build_summary(self, entry_ids):
+        from .services.summary import build_summary
+
         return build_summary(self.entries, entry_ids)
 
     @_guard
     def export_bindle(self, entry_ids, out_name=None):
+        from .services.bindle import export_bindle
+
         name = out_name or "绑定包"
         out_path = self.data_root.exports_dir / f"{name}.tidoc"
         lookup = {p["id"]: p for p in self.profiles.list()}
@@ -372,6 +381,8 @@ class Api:
 
     @_guard
     def export_overview_excel(self, entry_ids, out_name=None):
+        from .services.exports import export_overview_xlsx
+
         name = out_name or "报账总览"
         out_path = self.data_root.exports_dir / f"{name}.xlsx"
         lookup = {p["id"]: p for p in self.profiles.list()}
@@ -380,6 +391,8 @@ class Api:
 
     @_guard
     def export_attachment_archive(self, entry_ids, out_name=None):
+        from .services.exports import export_attachment_zip
+
         name = out_name or "附件整理包"
         out_path = self.data_root.exports_dir / f"{name}.zip"
         lookup = {p["id"]: p for p in self.profiles.list()}
@@ -390,10 +403,14 @@ class Api:
 
     @_guard
     def inspect_bindle(self, path):
+        from .services.bindle import inspect_bindle
+
         return inspect_bindle(path)
 
     @_guard
     def import_bindle(self, path, profile_id, allow_tampered=False):
+        from .services.bindle import import_bindle
+
         return import_bindle(self.entries, self.attachments, path, profile_id, allow_tampered)
 
     # ------------------------------------------------------------ 打印导出组件（可选）

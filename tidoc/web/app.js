@@ -257,9 +257,11 @@ function entryCard(e) {
   const check = el('div', 'entry-check');
   check.title = '切换选中';
   check.onclick = (ev) => { ev.stopPropagation(); toggleSelect(e.id, ev.shiftKey); };
+  check.ondblclick = (ev) => { ev.preventDefault(); ev.stopPropagation(); };
   const cb = el('input');
   cb.type = 'checkbox'; cb.checked = State.selected.has(e.id);
   cb.onclick = (ev) => { ev.stopPropagation(); toggleSelect(e.id, ev.shiftKey); };
+  cb.ondblclick = (ev) => { ev.preventDefault(); ev.stopPropagation(); };
   check.appendChild(cb);
 
   const stripe = el('div', 'entry-stripe');
@@ -429,13 +431,10 @@ function renderActiveFilters() {
     x.onclick = () => { State.selected.clear(); onClear(); }; c.appendChild(x);
     chips.push(c);
   };
-  if (State.quickView !== 'all') mkChip('视图：' + quickViewLabel(State.quickView), () => { setQuickView('all'); });
-  if (State.activeTitle) mkChip('抬头：' + (TITLE_SHORT[State.activeTitle] || State.activeTitle), () => { State.activeTitle = ''; $('#filterTitle').value = ''; refreshEntries(); });
+  // 工具条上已经可见的筛选条件不再生成 active chip，避免同一状态重复占位。
   if ($('#filterStatus')?.value) mkChip('状态：' + STATUS_LABEL[$('#filterStatus').value], () => { $('#filterStatus').value = ''; refreshEntries(); });
   if ($('#filterCheck').value) mkChip('校验：' + CHECK_LABEL[$('#filterCheck').value], () => { $('#filterCheck').value = ''; refreshEntries(); });
-  if ($('#filterProfile').value) mkChip('报账人：' + (State.profileById[$('#filterProfile').value]?.name || ''), () => { $('#filterProfile').value = ''; refreshEntries(); });
-  if (State.batchFilter) mkChip('批次：' + (State.batches.find((b) => b.id === State.batchFilter)?.name || ''), () => { State.batchFilter = ''; $('#filterBatch').value = ''; refreshEntries(); });
-  if ($('#filterKeyword').value) mkChip('搜索：' + $('#filterKeyword').value, () => { $('#filterKeyword').value = ''; refreshEntries(); });
+  // 批次聚焦已经由上方批次标签表达，避免同一状态在筛选 chip 里重复出现。
   if ($('#filterAmountMin').value || $('#filterAmountMax').value) mkChip(`金额 ${$('#filterAmountMin').value || '∞'}–${$('#filterAmountMax').value || '∞'}`, () => { $('#filterAmountMin').value = ''; $('#filterAmountMax').value = ''; refreshEntries(); });
   if ($('#filterDateFrom').value || $('#filterDateTo').value) mkChip(`日期 ${$('#filterDateFrom').value || '…'}–${$('#filterDateTo').value || '…'}`, () => { $('#filterDateFrom').value = ''; $('#filterDateTo').value = ''; refreshEntries(); });
   if (State.tagFilter) mkChip('标签：' + State.tagFilter, () => { State.tagFilter = ''; $('#filterTag').value = ''; refreshEntries(); });
@@ -458,10 +457,6 @@ function hasAnyFilter() {
     $('#filterDateFrom').value || $('#filterDateTo').value ||
     State.tagFilter || State.notesFilter || State.batchFilter ||
     State.quickView !== 'all');
-}
-
-function quickViewLabel(v) {
-  return { all: '全部', incomplete: '待补材料', warning: '需确认', modified: '已修改', complete: '齐备' }[v] || v;
 }
 
 function updateQuickViewButtons() {
@@ -580,7 +575,7 @@ function renderBatchFolders() {
       ${folders.map((b) => {
         const st = b.stats || {};
         return `<span class="batch-folder${State.batchFilter === b.id ? ' active' : ''}" data-folder="${esc(b.id)}">
-          <button class="folder-open" title="${esc(b.name)}">${esc(b.name)}<small>${st.count || 0} 条${st.incomplete ? ` · 缺 ${st.incomplete}` : ''}</small></button>
+          <button class="folder-open" title="${esc(b.name)}"><span>${esc(b.name)}</span><small>${st.count || 0} 条${st.incomplete ? ` · <span class="miss">缺 ${st.incomplete}</span>` : ' · 齐'}</small></button>
           <button class="folder-menu" data-folder-menu="${esc(b.id)}" title="批次操作">⋯</button>
         </span>`;
       }).join('')}
@@ -621,32 +616,22 @@ function renderBatchContext() {
   const b = State.batches.find((x) => x.id === State.batchFilter);
   if (!b) { bar.classList.add('hidden'); return; }
   const st = b.stats || {};
+  // 批次名、条数、缺料数和总额已由批次标签与列表统计表达，这里只保留按人拆分和整批动作。
   const persons = (st.by_person || []).map((p) =>
     `<span class="ctx-person">${esc(p.name)} <b>${p.count}</b>${p.incomplete ? ` <i title="${p.incomplete} 条未齐">缺${p.incomplete}</i>` : ''}</span>`).join('');
   bar.classList.remove('hidden');
   bar.innerHTML = `
     <div class="ctx-left">
-      <span class="ctx-badge">批次</span>
-      <b class="ctx-name">${esc(b.name)}</b>
-      <span class="ctx-stat">${st.count || 0} 条 · 合计 ${fmtMoney(st.total)}${st.incomplete ? ` · <span class="batch-warn">缺 ${st.incomplete}</span>` : ' · 全部齐备'}</span>
-      <span class="ctx-persons">${persons}</span>
+      ${persons ? `<span class="ctx-persons">${persons}</span>` : '<span class="ctx-persons muted">暂无人员拆分</span>'}
     </div>
     <div class="ctx-actions">
-      <button class="btn small ghost" id="ctxExport">导出这批</button>
-      <button class="btn small ghost" id="ctxPrint">打印这批</button>
-      <button class="btn small ghost" id="ctxRename">重命名</button>
-      <button class="btn small ghost" id="ctxArchive">${b.archived ? '取消归档' : '归档'}</button>
-      <button class="btn small ghost" id="ctxExit">退出批次</button>
+      <button class="btn small primary" id="ctxExport">导出</button>
+      <button class="btn small ghost" id="ctxPrint">打印</button>
     </div>`;
   const ids = () => State.entries.map((e) => e.id);
   $('#ctxExport').onclick = () => doExport(ids());
   $('#ctxPrint').onclick = () => openPrintDialog(ids());
-  $('#ctxRename').onclick = () => renameBatchFlow(b);
-  $('#ctxArchive').onclick = async () => {
-    try { await Api.archiveBatch(b.id, !b.archived); await loadBatches(); if (b.archived) focusBatch(b.id); else focusBatch(''); toast(b.archived ? '已取消归档' : '已归档', 'ok'); }
-    catch (e) { toast(e.message, 'err'); }
-  };
-  $('#ctxExit').onclick = () => focusBatch('');
+  // 重命名 / 归档 / 删除统一走 tab 的「⋯」菜单，此处不重复。
 }
 
 function openBatchMenu(x, y, b) {
@@ -884,7 +869,6 @@ function bindEvents() {
   const relistFromAdvanced = () => { State.selected.clear(); State.quickView = 'all'; updateQuickViewButtons(); refreshEntries(); };
   if ($('#filterStatus')) $('#filterStatus').onchange = relistFromAdvanced;
   $('#filterTitle').onchange = () => { State.activeTitle = $('#filterTitle').value; relist(); };
-  $('#filterBatch').onchange = () => focusBatch($('#filterBatch').value);
   $('#filterCheck').onchange = relistFromAdvanced;
   $('#filterProfile').onchange = relist;
   $('#sortSelect').onchange = relist;

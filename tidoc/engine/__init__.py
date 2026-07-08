@@ -9,13 +9,22 @@ from .models import (
     ParsedItem,
 )
 from .money import d, fmt_decimal, fmt_money, money
-from .parser import clean_item_name, parse_aspose_xml, parse_invoice_files, parse_pdf, parse_xml
 from .validator import (
     SUPPORTED_TITLES,
     TITLE_FOUNDATION,
     TITLE_UNIVERSITY,
     check_invoice,
 )
+
+_PARSER_EXPORTS = {"clean_item_name", "parse_xml", "parse_pdf", "parse_aspose_xml", "parse_invoice_files"}
+
+
+def __getattr__(name):
+    if name in _PARSER_EXPORTS:
+        from . import parser
+
+        return getattr(parser, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 __all__ = [
     "CHECK_BLOCKED",

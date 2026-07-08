@@ -5,9 +5,6 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>tidoc</title>
   <link rel="icon" type="image/png" href="assets/favicon.png" />
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght,SOFT,WONK@9..144,300..900,0..100,0..1&family=Schibsted+Grotesk:opsz,wght@10..36,400..700&family=JetBrains+Mono:wght@400;500&display=swap" />
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
@@ -41,17 +38,17 @@
           </span>
         </div>
         <div class="topbar-actions">
-          <button id="actionImport" class="btn ghost icon-text" title="导入绑定包 .tidoc">
+          <button id="actionImport" class="btn ghost icon-text" title="导入别人导出的 .tidoc 绑定包">
             <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M12 15V4m0 0 4 4m-4-4-4 4M5 19h14" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
-            <span>导入</span>
+            <span>导入包</span>
           </button>
           <button id="settingsBtn" class="btn ghost icon-only" title="设置">
             <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="1.7" fill="none"/><path d="M19 12a7 7 0 0 0-.1-1.2l2-1.5-2-3.4-2.4 1a7 7 0 0 0-2-1.2L14.2 3h-4.4l-.3 2.7a7 7 0 0 0-2 1.2l-2.4-1-2 3.4 2 1.5A7 7 0 0 0 5 12c0 .4 0 .8.1 1.2l-2 1.5 2 3.4 2.4-1a7 7 0 0 0 2 1.2l.3 2.7h4.4l.3-2.7a7 7 0 0 0 2-1.2l2.4 1 2-3.4-2-1.5c.1-.4.1-.8.1-1.2z" stroke="currentColor" stroke-width="1.4" fill="none" stroke-linejoin="round"/></svg>
           </button>
           <span class="topbar-divider"></span>
-          <button id="batchImportBtn" class="btn" title="从文件夹 / 多文件批量导入发票">
+          <button id="batchImportBtn" class="btn" title="从文件夹或多文件导入发票 PDF，可自动匹配 XML">
             <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><path d="M3 7h6l2 2h10v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V7z" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linejoin="round"/><path d="M12 11v6m0-6-2.5 2.5M12 11l2.5 2.5" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
-            <span>批量导入</span>
+            <span>导入发票</span>
           </button>
           <button id="newEntryBtn" class="btn primary" title="新建报账条目（N）">
             <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
@@ -80,12 +77,6 @@
           <label class="chip-select">
             <span class="chip-label">报账人</span>
             <select id="filterProfile">
-              <option value="">全部</option>
-            </select>
-          </label>
-          <label class="chip-select">
-            <span class="chip-label">批次</span>
-            <select id="filterBatch">
               <option value="">全部</option>
             </select>
           </label>
@@ -182,6 +173,10 @@
 
       <!-- 条目区 -->
       <main class="content">
+        <div class="batch-folders" id="batchFolders"></div>
+        <!-- 批次上下文条：当聚焦某批次时显示 -->
+        <div class="batch-context hidden" id="batchContext"></div>
+
         <div class="content-head">
           <div class="stats" id="stats"></div>
           <div class="select-tools" id="selectTools">
@@ -200,10 +195,6 @@
             <button class="btn small danger" id="batchDeleteBtn">删除</button>
           </div>
         </div>
-
-        <!-- 批次上下文条：当聚焦某批次时显示 -->
-        <div class="batch-context hidden" id="batchContext"></div>
-        <div class="batch-folders" id="batchFolders"></div>
 
         <div id="entryList" class="entry-list" data-density="comfortable"></div>
 
