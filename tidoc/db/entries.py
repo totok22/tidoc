@@ -60,7 +60,7 @@ class EntryRepo:
              p.seller, str(money(p.total)) if p.total else "", p.buyer_name,
              p.buyer_tax_id, status, "warning", p.source, now, now),
         )
-        # 可改字段初始化：origin = current（识别原值；实付金额识别不到留空）
+        # 可改字段初始化：origin = current；实付默认按发票总额，付款截图上传时再提醒确认或修改。
         for field in EDITABLE_FIELDS:
             origin = self._initial_editable(field, p)
             self.db.conn.execute(
@@ -81,6 +81,8 @@ class EntryRepo:
 
     @staticmethod
     def _initial_editable(field: str, p: ParsedInvoice) -> str:
+        if field == "paid_amount":
+            return str(money(p.total)) if p.total else ""
         if field == "actual_item_name":
             return p.items[0].actual_name if p.items else ""
         return ""

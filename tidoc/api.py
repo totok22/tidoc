@@ -13,8 +13,11 @@ import re
 import subprocess
 import sys
 import time
+import webbrowser
 import uuid
 from pathlib import Path
+
+from tidoc import __version__
 
 from .db import (
     AttachmentRepo,
@@ -75,6 +78,31 @@ class Api:
     def delete_profile(self, profile_id):
         self.profiles.delete(profile_id)
         return {"deleted": profile_id}
+
+    # ------------------------------------------------------------ 应用偏好
+    @_guard
+    def app_preference(self, key, default=""):
+        row = self.db.conn.execute("SELECT value FROM meta WHERE key = ?", (str(key),)).fetchone()
+        return row["value"] if row else default
+
+    @_guard
+    def set_app_preference(self, key, value):
+        self.db.conn.execute(
+            "INSERT INTO meta(key, value) VALUES(?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (str(key), str(value)),
+        )
+        self.db.conn.commit()
+        return {"key": str(key), "value": str(value)}
+
+    @_guard
+    def app_info(self):
+        return {
+            "name": "tidoc",
+            "version": __version__,
+            "author": "totok22",
+            "repository": "https://github.com/totok22/tidoc",
+        }
 
     # ------------------------------------------------------------ 录入 / 识别
     @_guard
@@ -317,6 +345,7 @@ class Api:
     # ------------------------------------------------------------ 附件
     @_guard
     def add_attachment(self, entry_id, src_path, att_type, note=""):
+        self._validate_attachment_for_entry(entry_id, src_path, att_type)
         att = self.attachments.add(entry_id, src_path, att_type, note)
         self.entries.recompute_status(entry_id)
         return att
@@ -336,6 +365,13 @@ class Api:
     @_guard
     def update_attachment(self, att_id, fields=None):
         fields = fields or {}
+        current = self.attachments.get(att_id)
+        if not current:
+            raise FileNotFoundError(f"附件不存在：{att_id}")
+        new_type = fields.get("type") or current["type"]
+        new_path = fields.get("src_path") or current["abs_path"]
+        if fields.get("type") or fields.get("src_path"):
+            self._validate_attachment_for_entry(current["entry_id"], new_path, new_type)
         att = self.attachments.update(
             att_id,
             att_type=fields.get("type"),
@@ -345,6 +381,54 @@ class Api:
         if att and att.get("entry_id"):
             self.entries.recompute_status(att["entry_id"])
         return att
+
+    def _validate_attachment_for_entry(self, entry_id, src_path, att_type) -> None:
+        from .db import TYPE_INSPECTION, TYPE_INVOICE_PDF, TYPE_INVOICE_XML
+        from .engine import parse_invoice_files
+        from .services.folder_import import classify_pdf_attachment_type, extract_pdf_invoice_no
+
+        path = Path(src_path)
+        suffix = path.suffix.lower()
+        entry = self.entries.get(entry_id)
+        if not entry:
+            raise FileNotFoundError(f"条目不存在：{entry_id}")
+
+        if att_type == TYPE_INVOICE_XML:
+            if suffix != ".xml":
+                raise ValueError("发票 XML 只能添加 .xml 文件。")
+            parsed = parse_invoice_files(xml_path=path)
+            if not parsed.invoice_no or not (parsed.seller or parsed.buyer_name):
+                raise ValueError("这个 XML 不是可识别的官方电子发票 XML。")
+            _validate_same_invoice(entry, parsed.invoice_no, path.name)
+            return
+
+        if att_type == TYPE_INVOICE_PDF:
+            if suffix != ".pdf":
+                raise ValueError("发票 PDF 只能添加 .pdf 文件。")
+            detected = classify_pdf_attachment_type(path)
+            if detected == TYPE_INSPECTION:
+                raise ValueError("这个 PDF 像是发票查验单，请作为“查验单 PDF”添加。")
+            parsed = parse_invoice_files(pdf_path=path)
+            if not parsed.invoice_no:
+                raise ValueError("无法从这个 PDF 识别发票号，请确认它是原始发票 PDF。")
+            _validate_same_invoice(entry, parsed.invoice_no, path.name)
+            return
+
+        if att_type == TYPE_INSPECTION:
+            if suffix != ".pdf":
+                raise ValueError("查验单只能添加 PDF 文件。")
+            detected = classify_pdf_attachment_type(path)
+            if detected != TYPE_INSPECTION:
+                try:
+                    parsed = parse_invoice_files(pdf_path=path)
+                except Exception:
+                    parsed = None
+                if parsed and parsed.invoice_no:
+                    raise ValueError("这个 PDF 像是发票 PDF，请作为“发票 PDF”添加。")
+                raise ValueError("无法确认这个 PDF 是发票查验单。")
+            invoice_no = extract_pdf_invoice_no(path)
+            if invoice_no:
+                _validate_same_invoice(entry, invoice_no, path.name)
 
     @_guard
     def open_attachment(self, att_id):
@@ -540,6 +624,14 @@ class Api:
         _open_local_path(path)
         return {"opened": str(path)}
 
+    @_guard
+    def open_external_url(self, url):
+        text = str(url)
+        if not (text.startswith("https://") or text.startswith("http://")):
+            raise ValueError("只能打开网页链接。")
+        webbrowser.open(text)
+        return {"opened": text}
+
 
 def _file_dialog_kind(webview_module, modern_name: str, legacy_name: str):
     file_dialog = getattr(webview_module, "FileDialog", None)
@@ -590,6 +682,12 @@ def _open_local_path(path: str | Path) -> None:
         os.startfile(str(p))  # type: ignore[attr-defined]
     else:
         subprocess.Popen(["xdg-open", str(p)])
+
+
+def _validate_same_invoice(entry: dict, invoice_no: str, filename: str) -> None:
+    expected = entry.get("invoice_no") or ""
+    if expected and invoice_no and invoice_no != expected:
+        raise ValueError(f"这份材料不属于当前条目：{filename}。识别到发票号 {invoice_no}，当前条目是 {expected}。")
 
 
 def _reveal_local_path(path: str | Path) -> None:

@@ -39,6 +39,17 @@ def test_field_modification_marks_permanently(repos, sample_xmls):
     assert len(e["history"]) == 2
 
 
+def test_paid_amount_defaults_to_invoice_total(repos, sample_xmls):
+    p = repos["profiles"].create("张三", "李老师")
+    parsed = parse_xml(sample_xmls[0])
+    eid = repos["entries"].create(p["id"], title=parsed.buyer_name, parsed=parsed)
+
+    e = repos["entries"].get(eid)
+    paid = e["fields"]["paid_amount"]
+    assert paid["current"] == e["total"]
+    assert paid["modified"] is False
+
+
 def test_locked_field_correction_logged(repos, sample_xmls):
     p = repos["profiles"].create("张三", "李老师")
     parsed = parse_xml(sample_xmls[0])
@@ -143,6 +154,48 @@ def test_dropped_file_cleanup(api):
     res = api.cleanup_dropped_files(saved["paths"])["data"]
     assert res["deleted"] == 1
     assert not os.path.exists(path)
+
+
+def test_api_rejects_unrecognized_invoice_xml(api, sample_xmls, tmp_path):
+    p = api.create_profile("张三", "李老师")["data"]
+    e = api.create_entry(p["id"], xml_path=sample_xmls[0])["data"]
+    bad_xml = tmp_path / "not-invoice.xml"
+    bad_xml.write_text("<root><name>not official invoice</name></root>", encoding="utf-8")
+
+    res = api.add_attachment(e["id"], str(bad_xml), "invoice_xml")
+    assert res["ok"] is False
+    assert "官方电子发票 XML" in res["error"]
+
+
+def test_api_validates_inspection_pdf_invoice_no(api, sample_xmls, tmp_path):
+    from pypdf import PdfWriter
+
+    p = api.create_profile("张三", "李老师")["data"]
+    e = api.create_entry(p["id"], xml_path=sample_xmls[0])["data"]
+
+    same = tmp_path / "same-check.pdf"
+    writer = PdfWriter()
+    writer.add_blank_page(width=842, height=595)
+    writer.add_metadata({
+        "/Title": "国家税务总局全国增值税发票查验平台",
+        "/Subject": f"发票号码：{e['invoice_no']}",
+    })
+    with same.open("wb") as f:
+        writer.write(f)
+    assert api.add_attachment(e["id"], str(same), "inspection_pdf")["ok"] is True
+
+    wrong = tmp_path / "wrong-check.pdf"
+    writer = PdfWriter()
+    writer.add_blank_page(width=842, height=595)
+    writer.add_metadata({
+        "/Title": "国家税务总局全国增值税发票查验平台",
+        "/Subject": "发票号码：11111111111111111111",
+    })
+    with wrong.open("wb") as f:
+        writer.write(f)
+    res = api.add_attachment(e["id"], str(wrong), "inspection_pdf")
+    assert res["ok"] is False
+    assert "不属于当前条目" in res["error"]
 
 
 def test_bindle_round_trip_and_tamper(repos, sample_xmls, tmp_path):

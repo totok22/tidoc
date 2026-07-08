@@ -36,6 +36,9 @@ const Api = (() => {
     updateProfile: (id, fields) => call('update_profile', id, fields || {}),
     setDefaultProfile: (id) => call('set_default_profile', id),
     deleteProfile: (id) => call('delete_profile', id),
+    appPreference: (key, defaultValue) => call('app_preference', key, defaultValue || ''),
+    setAppPreference: (key, value) => call('set_app_preference', key, value || ''),
+    appInfo: () => call('app_info'),
 
     parseFiles: (xml, pdf) => call('parse_files', xml, pdf),
     createEntry: (args) => call('create_entry',
@@ -101,5 +104,6 @@ const Api = (() => {
     chooseAndMigrateDataRoot: () => call('choose_and_migrate_data_root'),
     resetDataRootToDefault: () => call('reset_data_root_to_default'),
     openPath: (path) => call('open_path', path),
+    openExternalUrl: (url) => call('open_external_url', url),
   };
 })();

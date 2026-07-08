@@ -66,6 +66,51 @@ def test_scan_folder_accepts_messy_invoice_pdfs_without_xml(tmp_path):
     assert r["ignored"]
 
 
+def test_scan_folder_detects_tax_verification_platform_pdf(tmp_path):
+    from pypdf import PdfWriter
+
+    pdf = tmp_path / "26.pdf"
+    writer = PdfWriter()
+    writer.add_blank_page(width=842, height=595)
+    writer.add_metadata({"/Title": "国家税务总局全国增值税发票查验平台"})
+    with pdf.open("wb") as f:
+        writer.write(f)
+
+    r = scan_folder(tmp_path)
+    assert r["invoice_pdf_count"] == 0
+    assert not r["groups"]
+    assert r["ignored"][0]["type"] == "inspection_pdf"
+
+
+def test_extract_invoice_no_from_tax_verification_pdf_metadata(tmp_path):
+    from pypdf import PdfWriter
+    from tidoc.services.folder_import import extract_pdf_invoice_no
+
+    pdf = tmp_path / "查验单.pdf"
+    writer = PdfWriter()
+    writer.add_blank_page(width=842, height=595)
+    writer.add_metadata({
+        "/Title": "国家税务总局全国增值税发票查验平台",
+        "/Subject": "发票号码：26952000001672381651",
+    })
+    with pdf.open("wb") as f:
+        writer.write(f)
+
+    assert extract_pdf_invoice_no(pdf) == "26952000001672381651"
+
+
+def test_scan_folder_does_not_match_short_numeric_pdf_stem_to_xml(tmp_path):
+    (tmp_path / "26.pdf").write_bytes(b"not a real pdf")
+    (tmp_path / "立创商城发票-7556653A-26957000000103383662.xml").write_text("<bad/>", encoding="utf-8")
+
+    r = scan_folder(tmp_path)
+    assert r["invoice_pdf_count"] == 1
+    assert r["matched_xml_count"] == 0
+    assert r["groups"][0]["files"][0]["name"] == "26.pdf"
+    assert len(r["groups"][0]["files"]) == 1
+    assert r["ungrouped"][0]["type"] == "invoice_xml"
+
+
 @requires_sample_data
 def test_known_messy_sample_pdfs_parse_core_fields():
     samples = [

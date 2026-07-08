@@ -94,7 +94,7 @@ async function init() {
   await refreshEntries();
   await refreshTagOptions();
   showSearchHintIfEmpty();
-  maybeShowFirstUseGuide();
+  await maybeShowFirstUseGuide();
 }
 
 // 启动时套用用户在设置里选的默认抬头 / 密度
@@ -279,10 +279,6 @@ function entryCard(e) {
   const actualCur = fields.actual_item_name ? fields.actual_item_name.current : '';
   const paidCur = fields.paid_amount ? fields.paid_amount.current : '';
 
-  // 三个附件完整度状态点：发票 / 付款 / 查验
-  const dot = (on, label) => `<span class="att-dot${on ? ' on' : ''}" title="${label}${on ? '：已上传' : '：缺'}">${label}</span>`;
-  const attDots = `<span class="att-dots">${dot(e.has_invoice, '发票')}${dot(e.has_payment, '付款')}${dot(e.has_inspection, '查验')}</span>`;
-
   // 完整度：基于后端派生的 completeness（状态自动推导），缺项做 tooltip
   const comp = e.completeness || { ready: false, status: e.status, missing: [] };
   const dstatus = comp.status || e.status;
@@ -294,6 +290,11 @@ function entryCard(e) {
   const notesPreview = notesCur
     ? `<span class="notes-preview important" title="${esc(notesCur)}">${iconNote(12)}${esc(notesCur)}</span>`
     : '<span class="notes-preview muted">无备注</span>';
+  const paidDiff = paidCur && !sameMoney(paidCur, e.total);
+  const actionBtn = (action, label, on, title) => (
+    `<button class="${on ? 'done' : ''}" data-card-action="${action}" title="${esc(title)}">` +
+    `<span class="action-state"></span>${label}</button>`
+  );
 
   const main = el('div', 'entry-main', `
     <div class="entry-line1">
@@ -305,12 +306,11 @@ function entryCard(e) {
     <div class="entry-line2">
       <span class="seller-muted" title="${esc(e.seller || '')}">${esc(e.seller || '未识别销售方')}</span>
       <span class="mono">${esc(e.invoice_no || '无发票号')}</span>
+    </div>
+    <div class="entry-line3">
       <span>${esc(dateShort(e.invoice_date))}</span>
-      ${attDots}
+      ${notesPreview}
     </div>`);
-  if (notesCur || actualCur) {
-    main.insertAdjacentHTML('beforeend', `<div class="entry-note-line">${notesPreview}</div>`);
-  }
   const tags = Array.isArray(e.tags) ? e.tags : [];
   if (tags.length) {
     main.insertAdjacentHTML('beforeend',
@@ -320,18 +320,20 @@ function entryCard(e) {
   const right = el('div', 'entry-right');
   right.innerHTML = `
     <div class="entry-total">${fmtMoney(e.total)}</div>
-    ${paidCur ? `<div class="entry-paid">实付 <b>${fmtMoney(paidCur)}</b></div>` : '<div class="entry-paid muted">实付未填</div>'}
+    ${paidDiff ? `<div class="entry-paid diff" title="实付金额与发票金额不同">实付 <b>${fmtMoney(paidCur)}</b><span>差异</span></div>` : ''}
     <div class="entry-inline-actions">
-      <button data-card-action="paid" title="填写实付金额">实付</button>
-      <button data-card-action="pay" title="添加付款截图">付款</button>
-      <button data-card-action="inspect" title="添加查验单">查验</button>
+      ${actionBtn('invoice', '发票', e.has_invoice, e.has_invoice ? '已添加发票材料；点击补充发票 PDF' : '添加发票 PDF')}
+      ${actionBtn('paid', '实付', !!paidCur, paidCur ? '已填写实付金额；点击修改' : '填写实付金额')}
+      ${actionBtn('pay', '付款', e.has_payment, e.has_payment ? '已添加付款截图；点击继续添加' : '添加付款截图')}
+      ${actionBtn('inspect', '查验', e.has_inspection, e.has_inspection ? '已添加查验单；点击继续添加' : '添加查验单')}
     </div>
     <div class="entry-open-hint">点击打开</div>`;
   right.querySelectorAll('[data-card-action]').forEach((b) => {
     b.onclick = async (ev) => {
       ev.stopPropagation();
       const action = b.dataset.cardAction;
-      if (action === 'paid') await quickPaidFlow(e);
+      if (action === 'invoice') await quickAddAttachment(e.id, 'invoice_pdf');
+      else if (action === 'paid') await quickPaidFlow(e);
       else if (action === 'pay') await quickAddAttachment(e.id, 'payment_screenshot');
       else if (action === 'inspect') await quickAddAttachment(e.id, 'inspection_pdf');
     };
@@ -369,6 +371,13 @@ function entryCard(e) {
     } catch (err) { toast(err.message, 'err'); }
   };
   return card;
+}
+
+function sameMoney(a, b) {
+  const x = Number(a);
+  const y = Number(b);
+  if (!isFinite(x) || !isFinite(y)) return String(a || '') === String(b || '');
+  return Math.round(x * 100) === Math.round(y * 100);
 }
 
 // 按报账人 / 抬头分组渲染，每组头显示条数、合计、齐备率，可整组选中
@@ -799,9 +808,38 @@ async function quickAddAttachment(entryId, type) {
     const paths = res.paths || [];
     if (!paths.length) return;
     for (const p of paths) await Api.addAttachment(entryId, p, type);
+    if (type === 'payment_screenshot') await maybeSetPaidFromInvoice(entryId);
     await refreshEntries();
     toast('材料已添加', 'ok');
   } catch (err) { toast(err.message, 'err'); }
+}
+
+async function maybeSetPaidFromInvoice(entryId) {
+  const entry = await Api.getEntry(entryId);
+  const paid = entry.fields?.paid_amount?.current || '';
+  if (!entry.total) return;
+  if (paid && !sameMoney(paid, entry.total)) return;
+  if (await askUseInvoiceTotal(entry.total, !!paid)) {
+    if (paid) return;
+    await Api.updateField(entryId, 'paid_amount', entry.total, State.currentProfileId);
+  } else {
+    await quickPaidFlow(entry);
+  }
+}
+
+function askUseInvoiceTotal(total, alreadyDefault) {
+  return new Promise((resolve) => {
+    const body = el('div', 'hint', '付款截图已添加。');
+    const m = modal({
+      title: '实付金额',
+      body,
+      footer: [
+        mkBtn('修改实付', 'ghost', () => { m.close(); resolve(false); }),
+        mkBtn(`${alreadyDefault ? '保持' : '按'} ${fmtMoney(total)}`, 'primary', () => { m.close(); resolve(true); }),
+      ],
+      onClose: () => resolve(false),
+    });
+  });
 }
 
 function openEntryMenu(x, y, e) {
@@ -897,6 +935,13 @@ function bindEvents() {
   $('#newEntryBtn').onclick = openNewEntry;
   $('#batchImportBtn').onclick = openBatchImport;
   $('#settingsBtn').onclick = openSettings;
+  $('#appTitle').onclick = () => Api.openExternalUrl('https://github.com/totok22/tidoc').catch((e) => toast(e.message, 'err'));
+  $('#appTitle').onkeydown = (e) => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      $('#appTitle').click();
+    }
+  };
   $('#emptyNew').onclick = () => openNewEntry();
   $('#actionImport').onclick = doImport;
 
@@ -1111,10 +1156,11 @@ function editProfileFlow(p, onDone) {
 }
 
 async function openSettings() {
-  let paths, printStatus;
+  let paths, printStatus, appInfo;
   try {
     paths = await Api.dataRoot();
     printStatus = await Api.printComponentStatus();
+    appInfo = await Api.appInfo();
   } catch (e) { toast(e.message, 'err'); return; }
   const body = el('div');
 
@@ -1207,11 +1253,14 @@ async function openSettings() {
 
       <!-- 关于 -->
       <div class="settings-block about">
-        <img src="assets/tidoc-logo-128.png" alt="" />
-        <div>
-          <b>tidoc</b>
-          <span>报账凭证管理与整理工具</span>
-          <button class="link-btn" id="setGuide">查看使用提示</button>
+        <img src="assets/tidoc-logo-128.png" alt="" id="setRepoLogo" title="打开 GitHub 仓库" />
+        <div class="settings-about-copy">
+          <b>${esc(appInfo.name)} <small>v${esc(appInfo.version)}</small></b>
+          <span>报账凭证管理与整理工具 · 作者 ${esc(appInfo.author)}</span>
+          <div class="settings-about-actions">
+            <button class="link-btn" id="setRepo">${esc(appInfo.repository)}</button>
+            <button class="link-btn" id="setGuide">查看使用提示</button>
+          </div>
         </div>
       </div>
     </div>`;
@@ -1238,6 +1287,8 @@ async function openSettings() {
   body.querySelector('#setProfiles').onclick = () => { m.close(); openProfileManager(false); };
   body.querySelector('#setUpdate').onclick = () => { m.close(); openUpdateDialog(); };
   body.querySelector('#setGuide').onclick = () => { m.close(); openUsageGuide(false); };
+  body.querySelector('#setRepo').onclick = () => Api.openExternalUrl(appInfo.repository).catch((e) => toast(e.message, 'err'));
+  body.querySelector('#setRepoLogo').onclick = () => Api.openExternalUrl(appInfo.repository).catch((e) => toast(e.message, 'err'));
   body.querySelector('#setOpenData').onclick = () => Api.openPath(paths.root).catch((e) => toast(e.message, 'err'));
   body.querySelector('#setOpenExports').onclick = () => Api.openPath(paths.exports).catch((e) => toast(e.message, 'err'));
   body.querySelector('#setMigrate').onclick = async () => {
@@ -1271,12 +1322,17 @@ async function openUpdateDialog() {
     body,
     footer: [mkBtn('关闭', 'ghost', () => m.close())],
   });
-  try {
+  const setBusy = (label) => {
+    body.querySelectorAll('button').forEach((btn) => { btn.disabled = true; });
+    const op = body.querySelector('#updateOperation');
+    if (op) op.innerHTML = `<div class="update-progress"><span></span></div><div class="hint">${esc(label)}</div>`;
+  };
+  const render = async (message = '') => {
     const status = await Api.checkUpdates();
     const rows = (status.updates || []).map((u) => {
       const available = u.available;
       const action = u.component === 'print'
-        ? `<button class="btn small${available ? '' : ' ghost'}" data-install-print ${available ? '' : 'disabled'}>安装</button>`
+        ? `<button class="btn small${available ? '' : ' ghost'}" data-install-print ${available ? '' : 'disabled'}>${available ? '安装' : '已安装'}</button>`
         : `<button class="btn small${available ? '' : ' ghost'}" data-download-core ${available ? '' : 'disabled'}>下载</button>`;
       return `<div class="settings-status-row">
         <b>${esc(u.name || u.component)}</b>
@@ -1295,35 +1351,48 @@ async function openUpdateDialog() {
       <div class="detail-section">
         <h3>可用版本<span class="h3-line"></span></h3>
         ${rows || '<div class="hint warn">清单里没有当前平台的更新包。</div>'}
-      </div>`;
+      </div>
+      <div id="updateOperation">${message ? `<div class="hint ok">${esc(message)}</div>` : ''}</div>`;
     const coreBtn = body.querySelector('[data-download-core]');
     if (coreBtn) coreBtn.onclick = async () => {
-      coreBtn.disabled = true;
-      coreBtn.textContent = '下载中';
+      setBusy('正在下载并校验核心更新包...');
+      let ok = false;
       try {
         const r = await Api.downloadCoreUpdate();
         toast('核心更新包已下载：' + baseName(r.file_path), 'ok');
+        await render('核心更新包已下载：' + baseName(r.file_path));
+        ok = true;
       } catch (e) { toast(e.message, 'err'); }
-      finally { coreBtn.textContent = '下载'; coreBtn.disabled = false; }
+      finally { if (!ok) await render().catch(() => {}); }
     };
     const printBtn = body.querySelector('[data-install-print]');
     if (printBtn) printBtn.onclick = async () => {
-      printBtn.disabled = true;
-      printBtn.textContent = '安装中';
+      setBusy('正在下载、校验并安装打印组件...');
+      let ok = false;
       try {
         const r = await Api.installPrintComponent();
         toast('打印组件已安装：' + r.version, 'ok');
+        await render('打印组件已安装：' + r.version);
+        ok = true;
       } catch (e) { toast(e.message, 'err'); }
-      finally { printBtn.textContent = '安装'; printBtn.disabled = false; }
+      finally { if (!ok) await render().catch(() => {}); }
     };
+  };
+  try {
+    await render();
   } catch (e) {
     body.innerHTML = `<div class="hint warn">${esc(e.message)}</div>`;
   }
 }
 
-function maybeShowFirstUseGuide() {
+async function maybeShowFirstUseGuide() {
   if (!State.profiles.length) return;
-  if (localStorage.getItem(FIRST_USE_GUIDE_KEY)) return;
+  let seen = localStorage.getItem(FIRST_USE_GUIDE_KEY);
+  try {
+    seen = seen || await Api.appPreference(FIRST_USE_GUIDE_KEY, '');
+    if (seen) localStorage.setItem(FIRST_USE_GUIDE_KEY, '1');
+  } catch (e) {}
+  if (seen) return;
   if ($('#modalRoot').lastChild) return;
   setTimeout(() => {
     if (!$('#modalRoot').lastChild && !localStorage.getItem(FIRST_USE_GUIDE_KEY)) {
@@ -1359,6 +1428,7 @@ function openUsageGuide(firstRun) {
     footer: [
       mkBtn('知道了', 'primary', () => {
         localStorage.setItem(FIRST_USE_GUIDE_KEY, '1');
+        Api.setAppPreference(FIRST_USE_GUIDE_KEY, '1').catch(() => {});
         m.close();
       }),
     ],
@@ -1713,7 +1783,7 @@ async function openEntryDetail(entryId) {
       ${flowStep(e.has_invoice, '发票', e.has_invoice ? '已导入' : '需要 PDF')}
       ${flowStep(e.has_payment, '付款', e.has_payment ? '已上传' : '后续补截图')}
       ${flowStep(e.has_inspection, '查验', e.has_inspection ? '已上传' : '后续补查验单')}
-      ${flowStep(!!((f.paid_amount || {}).current), '实付', (f.paid_amount || {}).current ? fmtMoney((f.paid_amount || {}).current) : '手动填写')}
+      ${flowStep(!!((f.paid_amount || {}).current), '实付', (f.paid_amount || {}).current ? fmtMoney((f.paid_amount || {}).current) : '待确认')}
     </div>`;
   const compLine = comp.ready
     ? `<p class="hint ok-hint" style="margin-top:10px">材料齐全、实付已填、校验通过。</p>`
@@ -1999,9 +2069,13 @@ async function addDroppedMaterialFiles(entryId, files) {
   const paths = await droppedFilesToPaths(files);
   try {
     await validateDroppedMaterialsForEntry(entryId, paths);
+    let addedPayment = false;
     for (const path of paths) {
-      await Api.addAttachment(entryId, path, classifyAttachmentByName(path));
+      const type = classifyAttachmentByName(path);
+      await Api.addAttachment(entryId, path, type);
+      if (type === 'payment_screenshot') addedPayment = true;
     }
+    if (addedPayment) await maybeSetPaidFromInvoice(entryId);
   } finally {
     await cleanupDroppedPaths(paths);
   }
@@ -2225,10 +2299,13 @@ async function openAttachDroppedFiles(paths) {
       mkBtn('添加到条目', 'primary', async () => {
         const entryId = body.querySelector('#dropEntry').value;
         try {
+          let addedPayment = false;
           for (const [idx, path] of paths.entries()) {
             const type = body.querySelector(`[data-drop-type="${idx}"]`).value;
             await Api.addAttachment(entryId, path, type);
+            if (type === 'payment_screenshot') addedPayment = true;
           }
+          if (addedPayment) await maybeSetPaidFromInvoice(entryId);
           await cleanupDroppedPaths(paths);
           m.close();
           await refreshEntries();
@@ -2267,6 +2344,7 @@ async function addAttachmentFlow(entryId, parentModal, presetType) {
           const paths = res.paths || [];
           if (!paths.length) return;
           for (const p of paths) await Api.addAttachment(entryId, p, type);
+          if (type === 'payment_screenshot') await maybeSetPaidFromInvoice(entryId);
           m.close(); parentModal.close(); openEntryDetail(entryId); await refreshEntries();
           toast('附件已添加', 'ok');
         } catch (err) { toast(err.message, 'err'); }
