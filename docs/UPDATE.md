@@ -47,3 +47,4 @@ tidoc/print/macos/tidoc-print-macos-v0.1.1.zip
 - 打印组件可直接下载安装到本机数据目录的 `components/print/<platform>/` 下。
 - 下载 / 安装过程会在设置弹窗里显示进行中状态，组件安装完成后立即刷新状态。
 - 客户端不保存腾讯云密钥，只做 HTTPS 下载和 SHA256 完整性校验。
+- macOS 上如果应用内 Python/OpenSSL 不能验证系统已信任的证书链，会用系统 `curl` 重试读取清单和下载文件；不会关闭证书校验。

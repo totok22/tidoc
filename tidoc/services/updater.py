@@ -11,6 +11,8 @@ import json
 import os
 import platform
 import shutil
+import ssl
+import subprocess
 import sys
 import tempfile
 import urllib.error
@@ -89,11 +91,11 @@ def sha256_file(path: str | Path) -> str:
 
 
 def load_manifest(url: str = MANIFEST_URL, timeout: int = 12) -> dict[str, Any]:
-    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            raw = resp.read()
+        raw = _read_url(url, timeout)
     except urllib.error.URLError as exc:
+        raise RuntimeError(f"无法读取更新清单：{exc}") from exc
+    except RuntimeError as exc:
         raise RuntimeError(f"无法读取更新清单：{exc}") from exc
     try:
         return json.loads(raw.decode("utf-8"))
@@ -188,10 +190,8 @@ def download_asset(
     tmp_fd, tmp_name = tempfile.mkstemp(prefix=filename + ".", suffix=".part", dir=updates_dir)
     os.close(tmp_fd)
     tmp_path = Path(tmp_name)
-    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp, tmp_path.open("wb") as out:
-            shutil.copyfileobj(resp, out, length=1024 * 1024)
+        _download_url(url, tmp_path, timeout)
         actual = sha256_file(tmp_path)
         if actual.lower() != expected:
             raise RuntimeError(f"SHA256 校验失败：期望 {expected}，实际 {actual}")
@@ -304,3 +304,92 @@ def _find_executable(root: Path, asset: dict[str, Any]) -> Path | None:
             return path
     files = [p for p in root.rglob("*") if p.is_file()]
     return files[0] if len(files) == 1 else None
+
+
+def _read_url(url: str, timeout: int) -> bytes:
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.read()
+    except urllib.error.URLError as exc:
+        if _is_certificate_error(exc):
+            return _read_url_with_system_trust(url, timeout, exc)
+        raise
+
+
+def _download_url(url: str, out_path: Path, timeout: int) -> None:
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp, out_path.open("wb") as out:
+            shutil.copyfileobj(resp, out, length=1024 * 1024)
+    except urllib.error.URLError as exc:
+        if _is_certificate_error(exc):
+            _download_url_with_system_trust(url, out_path, timeout, exc)
+            return
+        raise
+
+
+def _is_certificate_error(exc: BaseException) -> bool:
+    current: BaseException | None = exc
+    while current:
+        if isinstance(current, ssl.SSLCertVerificationError):
+            return True
+        if isinstance(current, ssl.SSLError) and "CERTIFICATE_VERIFY_FAILED" in str(current):
+            return True
+        reason = getattr(current, "reason", None)
+        if isinstance(reason, BaseException):
+            current = reason
+            continue
+        return "CERTIFICATE_VERIFY_FAILED" in str(current)
+    return False
+
+
+def _read_url_with_system_trust(url: str, timeout: int, original: BaseException) -> bytes:
+    if sys.platform == "darwin":
+        cmd = _curl_command(url, timeout)
+        try:
+            proc = subprocess.run(cmd, capture_output=True, timeout=timeout + 5, check=False)
+        except Exception as exc:
+            raise RuntimeError(_cert_fallback_message(original, exc)) from exc
+        if proc.returncode == 0:
+            return proc.stdout
+        err = (proc.stderr or b"").decode("utf-8", errors="ignore").strip()
+        raise RuntimeError(_cert_fallback_message(original, err or f"curl exit {proc.returncode}"))
+    raise original
+
+
+def _download_url_with_system_trust(url: str, out_path: Path, timeout: int, original: BaseException) -> None:
+    if sys.platform == "darwin":
+        cmd = _curl_command(url, timeout) + ["--output", str(out_path)]
+        try:
+            proc = subprocess.run(cmd, capture_output=True, timeout=timeout + 5, check=False)
+        except Exception as exc:
+            raise RuntimeError(_cert_fallback_message(original, exc)) from exc
+        if proc.returncode == 0:
+            return
+        err = (proc.stderr or b"").decode("utf-8", errors="ignore").strip()
+        raise RuntimeError(_cert_fallback_message(original, err or f"curl exit {proc.returncode}"))
+    raise original
+
+
+def _curl_command(url: str, timeout: int) -> list[str]:
+    curl = "/usr/bin/curl" if Path("/usr/bin/curl").exists() else "curl"
+    return [
+        curl,
+        "--fail",
+        "--location",
+        "--silent",
+        "--show-error",
+        "--max-time",
+        str(timeout),
+        "--user-agent",
+        USER_AGENT,
+        url,
+    ]
+
+
+def _cert_fallback_message(original: BaseException, fallback_error: object) -> str:
+    return (
+        "证书校验失败，已尝试使用系统信任链重新连接但仍失败。"
+        f"原始错误：{original}；系统下载错误：{fallback_error}"
+    )
