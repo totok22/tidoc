@@ -1387,7 +1387,7 @@ async function openSettings() {
             <span>${printDetail}</span>
           </div>
         </div>
-        <div class="settings-row" id="setUpdate">
+        <div class="settings-row is-actionable" id="setUpdate">
           <div class="settings-row-copy">
             <b>检查更新</b>
             <span>核心程序与可选组件</span>

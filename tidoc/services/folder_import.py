@@ -90,14 +90,33 @@ def _parse_invoice_no(path: Path, att_type: str) -> tuple[str, str]:
         return guessed, f"未能预解析：{exc}"
 
 
+def _looks_like_invoice_pdf_text(text: str) -> bool:
+    compact = re.sub(r"\s+", "", text or "")
+    if not compact:
+        return False
+    invoice_markers = (
+        "电子发票",
+        "数电",
+        "发票号码",
+        "开票日期",
+        "购买方",
+        "销售方",
+        "价税合计",
+        "项目名称",
+    )
+    return sum(1 for marker in invoice_markers if marker in compact) >= 2
+
+
 def _pdf_attachment_type(path: Path) -> str:
+    probe = _pdf_probe_text(path)
+    if any(k in probe for k in _INSPECTION_KEYWORDS) or "inv-veri.chinatax" in probe.lower():
+        return "inspection_pdf"
+    if _looks_like_invoice_pdf_text(probe):
+        return "invoice_pdf"
     if any(k in path.name for k in _INSPECTION_KEYWORDS):
         return "inspection_pdf"
     if any(k in path.name for k in _PAYMENT_KEYWORDS):
         return "payment_screenshot"
-    probe = _pdf_probe_text(path)
-    if any(k in probe for k in _INSPECTION_KEYWORDS) or "inv-veri.chinatax" in probe.lower():
-        return "inspection_pdf"
     return "invoice_pdf"
 
 

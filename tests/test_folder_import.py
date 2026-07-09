@@ -82,6 +82,26 @@ def test_scan_folder_detects_tax_verification_platform_pdf(tmp_path):
     assert r["ignored"][0]["type"] == "inspection_pdf"
 
 
+def test_pdf_content_beats_filename_keyword_for_type_classification(tmp_path):
+    from pypdf import PdfWriter
+
+    pdf = tmp_path / "查验后补发票.pdf"
+    writer = PdfWriter()
+    writer.add_blank_page(width=842, height=595)
+    writer.add_metadata({
+        "/Title": "电子发票 发票号码：26952000001672381651 开票日期：2026年07月01日",
+        "/Subject": "购买方 北京理工大学教育基金会 销售方 深圳市测试有限公司 价税合计",
+    })
+    with pdf.open("wb") as f:
+        writer.write(f)
+
+    r = scan_folder(tmp_path)
+    assert r["invoice_pdf_count"] == 1
+    assert len(r["groups"]) == 1
+    assert r["groups"][0]["files"][0]["type"] == "invoice_pdf"
+    assert not r["ignored"]
+
+
 def test_extract_invoice_no_from_tax_verification_pdf_metadata(tmp_path):
     from pypdf import PdfWriter
     from tidoc.services.folder_import import extract_pdf_invoice_no
