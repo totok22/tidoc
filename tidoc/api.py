@@ -629,14 +629,23 @@ class Api:
     @_guard
     def check_updates(self):
         from .services.updater import check_updates
-        return check_updates(self.data_root.components_dir)
+        return check_updates(self.data_root.components_dir, updates_dir=self.data_root.updates_dir)
 
     @_guard
     def download_core_update(self):
-        from .services.updater import COMPONENT_CORE, download_update, load_manifest
+        from .services.updater import COMPONENT_CORE, download_update, launch_core_update_package, load_manifest
         manifest = load_manifest()
         result = download_update(manifest, COMPONENT_CORE, self.data_root.updates_dir)
-        return result.to_dict()
+        launch_core_update_package(result.file_path)
+        data = result.to_dict()
+        data["launched"] = True
+        return data
+
+    @_guard
+    def open_downloaded_core_update(self):
+        from .services.updater import open_downloaded_core_update
+        info = open_downloaded_core_update(self.data_root.updates_dir)
+        return {"launched": True, **info}
 
     @_guard
     def install_print_component(self):

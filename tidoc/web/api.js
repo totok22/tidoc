@@ -96,6 +96,7 @@ const Api = (() => {
     buildPrints: (ids, options, name) => call('build_prints', ids, options || null, name || null),
     checkUpdates: () => call('check_updates'),
     downloadCoreUpdate: () => call('download_core_update'),
+    openDownloadedCoreUpdate: () => call('open_downloaded_core_update'),
     installPrintComponent: () => call('install_print_component'),
 
     buildSummary: (ids) => call('build_summary', ids),

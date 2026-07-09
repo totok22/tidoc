@@ -138,10 +138,26 @@ def installed_component_version(components_dir: str | Path, component: str, plat
         return ""
 
 
+def downloaded_core_update_info(updates_dir: str | Path, plat: str | None = None) -> dict[str, Any]:
+    marker = _core_update_marker(updates_dir, plat)
+    if not marker.exists():
+        return {}
+    try:
+        info = json.loads(marker.read_text("utf-8"))
+    except Exception:
+        return {}
+    file_path = Path(info.get("file_path") or "")
+    if not file_path.exists():
+        return {}
+    info["file_path"] = str(file_path)
+    return info
+
+
 def check_updates(
     components_dir: str | Path,
     manifest_url: str = MANIFEST_URL,
     plat: str | None = None,
+    updates_dir: str | Path | None = None,
 ) -> dict[str, Any]:
     plat = plat or current_platform()
     manifest = load_manifest(manifest_url)
@@ -163,12 +179,20 @@ def check_updates(
             current = installed_component_version(components_dir, name, plat)
         latest = asset.get("version") or ""
         available = bool(latest and (not current or version_gt(latest, current)))
+        downloaded: dict[str, Any] = {}
+        if name == COMPONENT_CORE and updates_dir is not None:
+            candidate = downloaded_core_update_info(updates_dir, plat)
+            if candidate.get("version") == latest:
+                downloaded = candidate
         result["updates"].append({
             "component": name,
             "name": asset.get("name") or name,
             "current_version": current,
             "latest_version": latest,
             "available": available,
+            "downloaded": bool(downloaded),
+            "downloaded_path": downloaded.get("file_path", ""),
+            "state": "current" if not available else ("downloaded" if downloaded else "available"),
             "asset": asset,
         })
     return result
@@ -210,6 +234,8 @@ def download_update(
 ) -> DownloadResult:
     asset = get_platform_asset(manifest, component, plat)
     path = download_asset(asset, updates_dir)
+    if component == COMPONENT_CORE:
+        _write_core_update_marker(updates_dir, asset, path)
     return DownloadResult(
         component=component,
         version=asset.get("version") or "",
@@ -218,6 +244,27 @@ def download_update(
         sha256=asset.get("sha256") or "",
         size=path.stat().st_size,
     )
+
+
+def open_downloaded_core_update(updates_dir: str | Path, plat: str | None = None) -> dict[str, Any]:
+    info = downloaded_core_update_info(updates_dir, plat)
+    file_path = info.get("file_path")
+    if not file_path:
+        raise FileNotFoundError("没有已下载的核心更新包。")
+    launch_core_update_package(file_path)
+    return info
+
+
+def launch_core_update_package(path: str | Path) -> None:
+    p = Path(path)
+    if not p.exists():
+        raise FileNotFoundError(f"更新包不存在：{p}")
+    if sys.platform == "darwin":
+        subprocess.Popen(["open", str(p)])
+    elif sys.platform.startswith("win"):
+        os.startfile(str(p))  # type: ignore[attr-defined]
+    else:
+        subprocess.Popen(["xdg-open", str(p)])
 
 
 def install_print_component(
@@ -290,6 +337,24 @@ def _component_root(components_dir: str | Path, component: str, plat: str | None
 
 def _component_version_dir(components_dir: str | Path, component: str, version: str, plat: str) -> Path:
     return _component_root(components_dir, component, plat) / version
+
+
+def _core_update_marker(updates_dir: str | Path, plat: str | None = None) -> Path:
+    return Path(updates_dir) / COMPONENT_CORE / (plat or current_platform()) / "current.json"
+
+
+def _write_core_update_marker(updates_dir: str | Path, asset: dict[str, Any], file_path: Path) -> None:
+    marker = _core_update_marker(updates_dir, asset.get("platform"))
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(json.dumps({
+        "component": COMPONENT_CORE,
+        "version": asset.get("version") or "",
+        "platform": asset.get("platform") or current_platform(),
+        "file_path": str(file_path),
+        "filename": file_path.name,
+        "source": asset.get("url") or "",
+        "sha256": asset.get("sha256") or "",
+    }, ensure_ascii=False, indent=2), "utf-8")
 
 
 def _find_executable(root: Path, asset: dict[str, Any]) -> Path | None:

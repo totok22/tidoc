@@ -1504,12 +1504,21 @@ async function openUpdateDialog() {
     const status = await Api.checkUpdates();
     const rows = (status.updates || []).map((u) => {
       const available = u.available;
-      const action = u.component === 'print'
-        ? `<button class="btn small${available ? '' : ' ghost'}" data-install-print ${available ? '' : 'disabled'}>${available ? '安装' : '已安装'}</button>`
-        : `<button class="btn small${available ? '' : ' ghost'}" data-download-core ${available ? '' : 'disabled'}>下载</button>`;
+      let state = available ? '<span class="settings-warn">有更新</span>' : '<span class="settings-ok">已是最新</span>';
+      let action = '';
+      if (u.component === 'print') {
+        action = `<button class="btn small${available ? '' : ' ghost'}" data-install-print ${available ? '' : 'disabled'}>${available ? '安装' : '已安装'}</button>`;
+      } else if (!available) {
+        action = '<button class="btn small ghost" disabled>已安装</button>';
+      } else if (u.downloaded) {
+        state = '<span class="settings-warn">已下载待安装</span>';
+        action = '<button class="btn small" data-open-core>打开更新包</button>';
+      } else {
+        action = '<button class="btn small" data-download-core>下载并打开</button>';
+      }
       return `<div class="settings-status-row">
         <b>${esc(u.name || u.component)}</b>
-        <span>${esc(u.current_version || '未安装')} → ${esc(u.latest_version || '未知')} ${available ? '<span class="settings-warn">有更新</span>' : '<span class="settings-ok">已是最新</span>'} ${action}</span>
+        <span>${esc(u.current_version || '未安装')} → ${esc(u.latest_version || '未知')} ${state} ${action}</span>
       </div>`;
     }).join('');
     body.innerHTML = `
@@ -1528,12 +1537,24 @@ async function openUpdateDialog() {
       <div id="updateOperation">${message ? `<div class="hint ok">${esc(message)}</div>` : ''}</div>`;
     const coreBtn = body.querySelector('[data-download-core]');
     if (coreBtn) coreBtn.onclick = async () => {
-      setBusy('正在下载并校验核心更新包...');
+      setBusy('正在下载、校验并打开核心更新包...');
       let ok = false;
       try {
         const r = await Api.downloadCoreUpdate();
-        toast('核心更新包已下载：' + baseName(r.file_path), 'ok');
-        await render('核心更新包已下载：' + baseName(r.file_path));
+        toast('核心更新包已打开：' + baseName(r.file_path), 'ok');
+        await render('核心更新包已下载并打开。完成安装后请重启 Tidoc。');
+        ok = true;
+      } catch (e) { toast(e.message, 'err'); }
+      finally { if (!ok) await render().catch(() => {}); }
+    };
+    const openCoreBtn = body.querySelector('[data-open-core]');
+    if (openCoreBtn) openCoreBtn.onclick = async () => {
+      setBusy('正在打开核心更新包...');
+      let ok = false;
+      try {
+        await Api.openDownloadedCoreUpdate();
+        toast('核心更新包已打开', 'ok');
+        await render('核心更新包已打开。完成安装后请重启 Tidoc。');
         ok = true;
       } catch (e) { toast(e.message, 'err'); }
       finally { if (!ok) await render().catch(() => {}); }

@@ -146,6 +146,52 @@ def test_extract_payment_amount_from_ocr_text():
     assert _payment_amount_from_text("账 单 管 理 一 83 ． 1 0 交 易 成 功") == "83.10"
 
 
+def test_windows_payment_ocr_runs_powershell_hidden(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    from tidoc.services import folder_import
+
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append((cmd, kwargs))
+        return SimpleNamespace(stdout="-12.34", stderr="")
+
+    image = tmp_path / "付款截图.png"
+    image.write_bytes(b"img")
+    monkeypatch.setattr(folder_import.sys, "platform", "win32")
+    monkeypatch.setattr(folder_import.subprocess, "CREATE_NO_WINDOW", 0x08000000, raising=False)
+    monkeypatch.setattr(folder_import.subprocess, "run", fake_run)
+
+    assert folder_import.extract_payment_image_amount(image) == "12.34"
+    cmd, kwargs = calls[0]
+    assert "-WindowStyle" in cmd
+    assert "Hidden" in cmd
+    assert kwargs["creationflags"] == 0x08000000
+
+
+def test_windows_tax_verification_ocr_runs_powershell_hidden(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    from tidoc.services import folder_import
+
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append((cmd, kwargs))
+        return SimpleNamespace(stdout="发票号码：26952000001672381651", stderr="")
+
+    pdf = tmp_path / "查验单.pdf"
+    pdf.write_bytes(b"pdf")
+    monkeypatch.setattr(folder_import.sys, "platform", "win32")
+    monkeypatch.setattr(folder_import.subprocess, "CREATE_NO_WINDOW", 0x08000000, raising=False)
+    monkeypatch.setattr(folder_import.subprocess, "run", fake_run)
+
+    assert folder_import.extract_pdf_invoice_no(pdf) == "26952000001672381651"
+    cmd, kwargs = calls[0]
+    assert "-WindowStyle" in cmd
+    assert "Hidden" in cmd
+    assert kwargs["creationflags"] == 0x08000000
+
+
 def test_api_classifies_inspection_pdf_material_invoice_no(api, tmp_path):
     from pypdf import PdfWriter
 
