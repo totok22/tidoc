@@ -85,7 +85,7 @@ const Api = (() => {
     updateItem: (itemId, fields) => call('update_item', itemId, fields || {}),
     deleteItem: (itemId) => call('delete_item', itemId),
 
-    addAttachment: (id, path, type, note) => call('add_attachment', id, path, type, note || ''),
+    addAttachment: (id, path, type, note, options) => call('add_attachment', id, path, type, note || '', options || null),
     deleteAttachment: (id) => call('delete_attachment', id),
     setAttachmentNote: (id, note) => call('set_attachment_note', id, note),
     updateAttachment: (id, fields) => call('update_attachment', id, fields || {}),
@@ -109,6 +109,7 @@ const Api = (() => {
     pickFolder: () => call('pick_folder'),
     scanFolder: (folder) => call('scan_folder', folder),
     scanFiles: (paths) => call('scan_files', paths || []),
+    classifyMaterialFiles: (paths) => call('classify_material_files', paths || []),
     saveDroppedFiles: (files) => call('save_dropped_files', files || []),
     cleanupDroppedFiles: (paths) => call('cleanup_dropped_files', paths || []),
     batchCreateEntries: (profileId, groups, title) => call('batch_create_entries', profileId, groups, title || ''),

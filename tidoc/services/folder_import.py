@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 from ..engine.parser import parse_invoice_files
@@ -23,6 +24,10 @@ _INSPECTION_KEYWORDS = ("查验单", "查验", "验真", "查验平台", "查验
 _STEM_JUNK_RE = re.compile(r"[\s_\-+＋（）()\[\]【】{}.,，。]+")
 _INVOICE_NO_RE = re.compile(r"\d{8,30}")
 _LABELED_INVOICE_NO_RE = re.compile(r"发票号码[:：]?\s*(\d{20})")
+_SPACED_INVOICE_NO_RE = re.compile(r"(?<!\d)(?:\d[\s\u3000]*){20}(?!\d)")
+_PAYMENT_AMOUNT_RE = re.compile(
+    r"(?<![\d.])[-−－—一]\s*(?:[¥￥]\s*)?(\d{1,7}(?:[,，]\d{3})*(?:\.\d{1,2})?)(?![\d.])"
+)
 
 
 def _file_info(path: Path, att_type: str, invoice_no: str = "", warning: str = "") -> dict:
@@ -61,6 +66,18 @@ def _invoice_no_from_name(path: Path) -> str:
     return m.group(0) if m else ""
 
 
+def _invoice_no_from_text(text: str) -> str:
+    labeled = _LABELED_INVOICE_NO_RE.search(text or "")
+    if labeled:
+        return labeled.group(1)
+    for no in re.findall(r"\d{20}", text or ""):
+        return no
+    spaced = _SPACED_INVOICE_NO_RE.search(text or "")
+    if spaced:
+        return re.sub(r"\D", "", spaced.group(0))
+    return ""
+
+
 def _parse_invoice_no(path: Path, att_type: str) -> tuple[str, str]:
     try:
         if att_type == "invoice_pdf":
@@ -91,12 +108,144 @@ def classify_pdf_attachment_type(path: str | Path) -> str:
 def extract_pdf_invoice_no(path: str | Path) -> str:
     path = Path(path)
     probe = _pdf_probe_text(Path(path))
-    labeled = _LABELED_INVOICE_NO_RE.search(probe)
-    if labeled:
-        return labeled.group(1)
-    for no in re.findall(r"\d{20}", probe):
-        return no
+    invoice_no = _invoice_no_from_text(probe)
+    if invoice_no:
+        return invoice_no
     return _macos_ocr_tax_verification_invoice_no(path) or _windows_ocr_tax_verification_invoice_no(path)
+
+
+def extract_payment_image_amount(path: str | Path) -> str:
+    path = Path(path)
+    if path.suffix.lower() not in _IMAGE_EXT:
+        return ""
+    text = _macos_ocr_image_text(path) or _windows_ocr_image_text(path)
+    return _payment_amount_from_text(text)
+
+
+def _payment_amount_from_text(text: str) -> str:
+    compact = re.sub(r"\s+", "", text or "")
+    compact = re.sub(r"(?<=\d)[·．。](?=\d)", ".", compact)
+    for match in _PAYMENT_AMOUNT_RE.finditer(compact):
+        raw = match.group(1).replace(",", "").replace("，", "")
+        try:
+            amount = Decimal(raw).quantize(Decimal("0.01"))
+        except (InvalidOperation, ValueError):
+            continue
+        if amount > 0:
+            return f"{amount:.2f}"
+    return ""
+
+
+def _macos_ocr_image_text(path: Path) -> str:
+    if sys.platform != "darwin":
+        return ""
+    try:
+        import objc
+        from Foundation import NSDictionary, NSURL
+
+        objc.loadBundle("Vision", globals(), bundle_path="/System/Library/Frameworks/Vision.framework")
+        req = VNRecognizeTextRequest.alloc().init()  # type: ignore[name-defined]
+        req.setRecognitionLevel_(0)
+        if hasattr(req, "setUsesLanguageCorrection_"):
+            req.setUsesLanguageCorrection_(False)
+        req.setRecognitionLanguages_(["zh-Hans", "en-US"])
+        handler = VNImageRequestHandler.alloc().initWithURL_options_(  # type: ignore[name-defined]
+            NSURL.fileURLWithPath_(str(path)),
+            NSDictionary.dictionary(),
+        )
+        result = handler.performRequests_error_([req], None)
+        if isinstance(result, tuple) and not result[0]:
+            return ""
+        lines: list[str] = []
+        for obs in req.results() or []:
+            candidates = obs.topCandidates_(1)
+            if candidates:
+                lines.append(str(candidates[0].string()))
+        return "\n".join(lines)
+    except Exception:
+        return ""
+
+
+def _windows_ocr_image_text(path: Path) -> str:
+    if not sys.platform.startswith("win"):
+        return ""
+    script = r"""
+param([string]$Path)
+[Console]::OutputEncoding = [Text.UTF8Encoding]::UTF8
+Add-Type -AssemblyName System.Runtime.WindowsRuntime
+Add-Type -AssemblyName System.Drawing
+$null = [Windows.Storage.StorageFile, Windows.Storage, ContentType = WindowsRuntime]
+$null = [Windows.Storage.Streams.IRandomAccessStreamWithContentType, Windows.Storage.Streams, ContentType = WindowsRuntime]
+$null = [Windows.Graphics.Imaging.BitmapDecoder, Windows.Graphics.Imaging, ContentType = WindowsRuntime]
+$null = [Windows.Graphics.Imaging.SoftwareBitmap, Windows.Graphics.Imaging, ContentType = WindowsRuntime]
+$null = [Windows.Media.Ocr.OcrEngine, Windows.Foundation, ContentType = WindowsRuntime]
+$null = [Windows.Media.Ocr.OcrResult, Windows.Foundation, ContentType = WindowsRuntime]
+$null = [Windows.Globalization.Language, Windows.Foundation, ContentType = WindowsRuntime]
+function Await-Operation($Operation, [Type]$ResultType) {
+    $method = [System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object {
+        $_.Name -eq 'AsTask' -and $_.IsGenericMethodDefinition -and $_.GetParameters().Count -eq 1
+    } | Select-Object -First 1
+    $task = $method.MakeGenericMethod($ResultType).Invoke($null, @($Operation))
+    $task.Wait()
+    return $task.Result
+}
+function Recognize-Image($ImagePath) {
+    $file = Await-Operation ([Windows.Storage.StorageFile]::GetFileFromPathAsync($ImagePath)) ([Windows.Storage.StorageFile])
+    $stream = Await-Operation ($file.OpenReadAsync()) ([Windows.Storage.Streams.IRandomAccessStreamWithContentType])
+    $decoder = Await-Operation ([Windows.Graphics.Imaging.BitmapDecoder]::CreateAsync($stream)) ([Windows.Graphics.Imaging.BitmapDecoder])
+    $bitmap = Await-Operation ($decoder.GetSoftwareBitmapAsync()) ([Windows.Graphics.Imaging.SoftwareBitmap])
+    $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromLanguage([Windows.Globalization.Language]::new('zh-Hans'))
+    if ($null -eq $engine) { $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromUserProfileLanguages() }
+    if ($null -eq $engine) { return '' }
+    $result = Await-Operation ($engine.RecognizeAsync($bitmap)) ([Windows.Media.Ocr.OcrResult])
+    return $result.Text
+}
+function Crop-TopPaymentArea($ImagePath) {
+    $src = [System.Drawing.Bitmap]::new($ImagePath)
+    $rect = [System.Drawing.Rectangle]::new(0, 0, $src.Width, [int]($src.Height * 0.45))
+    $crop = $src.Clone($rect, $src.PixelFormat)
+    $scaled = [System.Drawing.Bitmap]::new([int]($crop.Width * 2), [int]($crop.Height * 2))
+    $g = [System.Drawing.Graphics]::FromImage($scaled)
+    $g.Clear([System.Drawing.Color]::White)
+    $g.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+    $g.DrawImage($crop, 0, 0, $scaled.Width, $scaled.Height)
+    $out = [System.IO.Path]::ChangeExtension($ImagePath, '.top.png')
+    $scaled.Save($out, [System.Drawing.Imaging.ImageFormat]::Png)
+    $g.Dispose(); $scaled.Dispose(); $crop.Dispose(); $src.Dispose()
+    return $out
+}
+Recognize-Image $Path
+$topPath = Crop-TopPaymentArea $Path
+Recognize-Image $topPath
+"""
+    try:
+        with tempfile.TemporaryDirectory(prefix="tidoc-ocr-") as tmp:
+            tmp_dir = Path(tmp)
+            image_path = tmp_dir / f"input{path.suffix.lower()}"
+            script_path = tmp_dir / "ocr-image.ps1"
+            shutil.copy2(path, image_path)
+            script_path.write_text(script, encoding="utf-8")
+            proc = subprocess.run(
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    str(script_path),
+                    "-Path",
+                    str(image_path),
+                ],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="ignore",
+                timeout=20,
+                check=False,
+            )
+        return (proc.stdout or "") + "\n" + (proc.stderr or "")
+    except Exception:
+        return ""
 
 
 def _macos_ocr_tax_verification_invoice_no(path: Path) -> str:
@@ -149,9 +298,9 @@ def _macos_ocr_tax_verification_invoice_no(path: Path) -> str:
                 CGRectMake=CGRectMake,
                 kCGImageAlphaPremultipliedLast=kCGImageAlphaPremultipliedLast,
             )
-            match = re.search(r"\d{20}", text)
-            if match:
-                return match.group(0)
+            invoice_no = _invoice_no_from_text(text)
+            if invoice_no:
+                return invoice_no
     except Exception:
         return ""
     return ""
@@ -192,19 +341,28 @@ $file = Await-Operation ([Windows.Storage.StorageFile]::GetFileFromPathAsync($Pa
 $pdf = Await-Operation ([Windows.Data.Pdf.PdfDocument]::LoadFromFileAsync($file)) ([Windows.Data.Pdf.PdfDocument])
 $page = $pdf.GetPage(0)
 $size = $page.Size
-$opts = [Windows.Data.Pdf.PdfPageRenderOptions]::new()
-$opts.SourceRect = [Windows.Foundation.Rect]::new($size.Width * 0.08, $size.Height * 0.17, $size.Width * 0.34, $size.Height * 0.12)
-$opts.DestinationWidth = [uint32]($opts.SourceRect.Width * 8)
-$opts.DestinationHeight = [uint32]($opts.SourceRect.Height * 8)
-$stream = [Windows.Storage.Streams.InMemoryRandomAccessStream]::new()
-Await-Action ($page.RenderToStreamAsync($stream, $opts))
-$stream.Seek(0) | Out-Null
-$decoder = Await-Operation ([Windows.Graphics.Imaging.BitmapDecoder]::CreateAsync($stream)) ([Windows.Graphics.Imaging.BitmapDecoder])
-$bitmap = Await-Operation ($decoder.GetSoftwareBitmapAsync()) ([Windows.Graphics.Imaging.SoftwareBitmap])
 $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromLanguage([Windows.Globalization.Language]::new('zh-Hans'))
 if ($null -eq $engine) { $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromUserProfileLanguages() }
-$result = Await-Operation ($engine.RecognizeAsync($bitmap)) ([Windows.Media.Ocr.OcrResult])
-$result.Text
+$rects = @(
+    @(0.08, 0.17, 0.34, 0.12),
+    @(0.02, 0.10, 0.60, 0.22),
+    @(0.00, 0.00, 1.00, 0.35)
+)
+foreach ($r in $rects) {
+    $opts = [Windows.Data.Pdf.PdfPageRenderOptions]::new()
+    $opts.SourceRect = [Windows.Foundation.Rect]::new($size.Width * $r[0], $size.Height * $r[1], $size.Width * $r[2], $size.Height * $r[3])
+    $opts.DestinationWidth = [uint32]($opts.SourceRect.Width * 8)
+    $opts.DestinationHeight = [uint32]($opts.SourceRect.Height * 8)
+    $stream = [Windows.Storage.Streams.InMemoryRandomAccessStream]::new()
+    Await-Action ($page.RenderToStreamAsync($stream, $opts))
+    $stream.Seek(0) | Out-Null
+    $decoder = Await-Operation ([Windows.Graphics.Imaging.BitmapDecoder]::CreateAsync($stream)) ([Windows.Graphics.Imaging.BitmapDecoder])
+    $bitmap = Await-Operation ($decoder.GetSoftwareBitmapAsync()) ([Windows.Graphics.Imaging.SoftwareBitmap])
+    $result = Await-Operation ($engine.RecognizeAsync($bitmap)) ([Windows.Media.Ocr.OcrResult])
+    if ($result -and $result.Text) {
+        $result.Text
+    }
+}
 """
     try:
         with tempfile.TemporaryDirectory(prefix="tidoc-ocr-") as tmp:
@@ -231,8 +389,7 @@ $result.Text
                 timeout=20,
                 check=False,
             )
-        match = re.search(r"\d{20}", (proc.stdout or "") + "\n" + (proc.stderr or ""))
-        return match.group(0) if match else ""
+        return _invoice_no_from_text((proc.stdout or "") + "\n" + (proc.stderr or ""))
     except Exception:
         return ""
 

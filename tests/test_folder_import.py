@@ -99,6 +99,51 @@ def test_extract_invoice_no_from_tax_verification_pdf_metadata(tmp_path):
     assert extract_pdf_invoice_no(pdf) == "26952000001672381651"
 
 
+def test_extract_invoice_no_accepts_ocr_spaced_digits(tmp_path):
+    from pypdf import PdfWriter
+    from tidoc.services.folder_import import extract_pdf_invoice_no
+
+    pdf = tmp_path / "查验单.pdf"
+    writer = PdfWriter()
+    writer.add_blank_page(width=842, height=595)
+    writer.add_metadata({
+        "/Title": "国家税务总局全国增值税发票查验平台",
+        "/Subject": "261 17000000609873879 北京理工大学教育基金会",
+    })
+    with pdf.open("wb") as f:
+        writer.write(f)
+
+    assert extract_pdf_invoice_no(pdf) == "26117000000609873879"
+
+
+def test_extract_payment_amount_from_ocr_text():
+    from tidoc.services.folder_import import _payment_amount_from_text
+
+    assert _payment_amount_from_text("全部账单\n-128.62\n支付成功") == "128.62"
+    assert _payment_amount_from_text("交易详情\n- ¥816.84\n余额¥4,640.69") == "816.84"
+    assert _payment_amount_from_text("深圳市立创电子商务有限公司\n- ￥45.74") == "45.74"
+    assert _payment_amount_from_text("全 部 账 单 先 用 后 付 一 128 · 62 支 付 成 功") == "128.62"
+    assert _payment_amount_from_text("账 单 管 理 一 83 ． 1 0 交 易 成 功") == "83.10"
+
+
+def test_api_classifies_inspection_pdf_material_invoice_no(api, tmp_path):
+    from pypdf import PdfWriter
+
+    pdf = tmp_path / "26.pdf"
+    writer = PdfWriter()
+    writer.add_blank_page(width=842, height=595)
+    writer.add_metadata({
+        "/Title": "国家税务总局全国增值税发票查验平台",
+        "/Subject": "发票号码：26952000001672381651",
+    })
+    with pdf.open("wb") as f:
+        writer.write(f)
+
+    result = api.classify_material_files([str(pdf)])["data"]
+    assert result[0]["type"] == "inspection_pdf"
+    assert result[0]["invoice_no"] == "26952000001672381651"
+
+
 def test_scan_folder_does_not_match_short_numeric_pdf_stem_to_xml(tmp_path):
     (tmp_path / "26.pdf").write_bytes(b"not a real pdf")
     (tmp_path / "立创商城发票-7556653A-26957000000103383662.xml").write_text("<bad/>", encoding="utf-8")
@@ -140,6 +185,8 @@ def test_batch_create_entries(api):
               for g in picked]
     res = api.batch_create_entries(p["id"], groups)["data"]
     assert res["created"] == 2
+    assert len(res["created_entries"]) == 2
+    assert {item["group"] for item in res["created_entries"]} == {g["label"] for g in picked}
     assert not res["failed"]
     for eid in res["entry_ids"]:
         e = api.get_entry(eid)["data"]

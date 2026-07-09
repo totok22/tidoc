@@ -18,6 +18,7 @@ const State = {
   batches: [],           // 批次列表缓存
   allTags: [],           // 全库用过的标签
   multiClaimantMode: false,
+  activeDetailEntryId: null,
 };
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -841,10 +842,16 @@ async function quickAddAttachment(entryId, type) {
     const res = await Api.pickFiles(type === 'payment_screenshot');
     const paths = res.paths || [];
     if (!paths.length) return;
-    for (const p of paths) await Api.addAttachment(entryId, p, type);
-    if (type === 'payment_screenshot') await maybeSetPaidFromInvoice(entryId);
-    await refreshEntries();
-    toast('材料已添加', 'ok');
+    if (type === 'payment_screenshot') {
+      const infos = (await materialInfosForPaths(paths)).map((info) => ({ ...info, type }));
+      const result = await addMaterialInfosToEntry(entryId, infos);
+      await refreshEntries();
+      toast(result.message || '材料已添加', 'ok');
+    } else {
+      for (const p of paths) await Api.addAttachment(entryId, p, type);
+      await refreshEntries();
+      toast('材料已添加', 'ok');
+    }
   } catch (err) { toast(err.message, 'err'); }
 }
 
@@ -882,6 +889,86 @@ function askUseInvoiceTotal(total, alreadyDefault) {
         if (!settled) {
           settled = true;
           resolve(false);
+        }
+      },
+    });
+  });
+}
+
+async function settlePaymentAmountAfterAdd(entryId, paymentInfos) {
+  if (!paymentInfos.length) return "";
+  const entry = await Api.getEntry(entryId);
+  const paid = entry.fields?.paid_amount?.current || '';
+  const total = entry.total || '';
+  const currentIsDefault = !paid || (total && sameMoney(paid, total));
+  const amounts = paymentInfos
+    .map((info) => moneyText(info.paid_amount || info.payment_ocr?.paid_amount || ''))
+    .filter(Boolean);
+
+  if (!amounts.length) {
+    await maybeSetPaidFromInvoice(entryId);
+    return "";
+  }
+  if (!currentIsDefault) {
+    return `已识别付款 ${paymentAmountSummary(amounts)}，保留当前实付 ${fmtMoney(paid)}`;
+  }
+
+  if (paymentInfos.length === 1 && amounts.length === 1) {
+    await Api.updateField(entryId, 'paid_amount', amounts[0], State.currentProfileId);
+    return `已按付款截图填写实付 ${fmtMoney(amounts[0])}`;
+  }
+
+  const sum = sumMoneyText(amounts);
+  const choice = await askUseRecognizedPaymentAmount(amounts, sum);
+  if (choice === 'use') {
+    await Api.updateField(entryId, 'paid_amount', sum, State.currentProfileId);
+    return `已填写实付 ${fmtMoney(sum)}`;
+  } else if (choice === 'manual') {
+    await quickPaidFlow(entry);
+  }
+  return "";
+}
+
+function moneyText(value) {
+  const n = Number(String(value || '').replace(/,/g, ''));
+  if (!isFinite(n) || n <= 0) return '';
+  return n.toFixed(2);
+}
+
+function sumMoneyText(values) {
+  const cents = values.reduce((acc, v) => acc + Math.round(Number(v) * 100), 0);
+  return (cents / 100).toFixed(2);
+}
+
+function paymentAmountSummary(amounts) {
+  if (amounts.length === 1) return fmtMoney(amounts[0]);
+  return `${amounts.map((a) => fmtMoney(a)).join(' + ')} = ${fmtMoney(sumMoneyText(amounts))}`;
+}
+
+function askUseRecognizedPaymentAmount(amounts, sum) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = (value) => {
+      if (settled) return;
+      settled = true;
+      m.close();
+      resolve(value);
+    };
+    const body = el('div');
+    body.innerHTML = `
+      <div class="hint">识别到付款金额：${esc(paymentAmountSummary(amounts))}</div>`;
+    const m = modal({
+      title: '实付金额',
+      body,
+      footer: [
+        mkBtn('保持当前', 'ghost', () => done('keep')),
+        mkBtn('手动填写', 'ghost', () => done('manual')),
+        mkBtn(`按 ${fmtMoney(sum)}`, 'primary', () => done('use')),
+      ],
+      onClose: () => {
+        if (!settled) {
+          settled = true;
+          resolve('keep');
         }
       },
     });
@@ -1018,6 +1105,7 @@ function bindEvents() {
   $('#filterNotes').onchange = () => { State.notesFilter = $('#filterNotes').value; relistFromAdvanced(); };
 
   setupGlobalDrop();
+  setupClipboardUpload();
 
   document.addEventListener('keydown', (e) => {
     if (e.target.matches('input, textarea, select')) {
@@ -1230,22 +1318,6 @@ async function openSettings() {
         </div>
       </div>
 
-      <div class="settings-block">
-        <details class="settings-advanced" id="paymentInfoFold">
-          <summary>收款信息</summary>
-          <div class="form-grid settings-form-grid">
-            <div class="form-row"><label>姓名</label><input id="opName" value="${esc(operatorPrefs.name)}"/></div>
-            <div class="form-row"><label>学号</label><input id="opStudent" value="${esc(operatorPrefs.student_id)}"/></div>
-            <div class="form-row"><label>电话</label><input id="opContact" value="${esc(operatorPrefs.contact)}"/></div>
-            <div class="form-row"><label>开户行</label><input id="opBank" value="${esc(operatorPrefs.bank_name)}"/></div>
-            <div class="form-row"><label>卡号</label><input id="opCard" value="${esc(operatorPrefs.bank_card)}"/></div>
-          </div>
-          <div class="settings-row-actions">
-            <button class="btn small" id="setSaveOperator">保存身份</button>
-          </div>
-        </details>
-      </div>
-
       <!-- 偏好 -->
       <div class="settings-block">
         <div class="settings-block-title">偏好</div>
@@ -1283,6 +1355,19 @@ async function openSettings() {
           <button class="btn small ghost" id="setOpenData">打开文件夹</button>
           <button class="btn small ghost" id="setOpenExports">打开导出目录</button>
         </div>
+        <details class="settings-advanced" id="paymentInfoFold">
+          <summary>收款信息</summary>
+          <div class="form-grid settings-form-grid">
+            <div class="form-row"><label>姓名</label><input id="opName" value="${esc(operatorPrefs.name)}"/></div>
+            <div class="form-row"><label>学号</label><input id="opStudent" value="${esc(operatorPrefs.student_id)}"/></div>
+            <div class="form-row"><label>电话</label><input id="opContact" value="${esc(operatorPrefs.contact)}"/></div>
+            <div class="form-row"><label>开户行</label><input id="opBank" value="${esc(operatorPrefs.bank_name)}"/></div>
+            <div class="form-row"><label>卡号</label><input id="opCard" value="${esc(operatorPrefs.bank_card)}"/></div>
+          </div>
+          <div class="settings-row-actions">
+            <button class="btn small" id="setSaveOperator">保存身份</button>
+          </div>
+        </details>
         <details class="settings-advanced">
           <summary>高级数据维护</summary>
           <div class="settings-row-actions">
@@ -1682,8 +1767,9 @@ async function openBatchImportFromFiles() {
   } catch (e) { toast('扫描失败：' + e.message, 'err'); }
 }
 
-function openBatchImportPreview(scan, sourceLabel) {
+function openBatchImportPreview(scan, sourceLabel, options = {}) {
   const groups = scan.groups.map((g) => ({
+    key: g.key,
     label: g.label,
     selected: g.selected !== false,
     warnings: g.warnings || [],
@@ -1691,6 +1777,7 @@ function openBatchImportPreview(scan, sourceLabel) {
   }));
   const ungrouped = scan.ungrouped || [];
   const ignored = scan.ignored || [];
+  const pendingMaterialInfos = options.pendingMaterialInfos || [];
 
   const body = el('div');
   const render = () => {
@@ -1722,6 +1809,19 @@ function openBatchImportPreview(scan, sourceLabel) {
           </div>`).join('')}</div>
       </div>` : '';
 
+    const pendingRows = pendingMaterialInfos.length ? `
+      <div class="detail-section" style="margin-top:16px">
+        <h3>可自动绑定材料<span class="h3-line"></span></h3>
+        <div class="hint" style="margin-bottom:10px">创建条目后，将按发票号自动绑定查验单；未匹配的材料会再让你选择条目。</div>
+        <div class="bi-muted-list">${pendingMaterialInfos.map((f) => `
+          <div class="bi-file">
+            <span class="attach-type">${esc(f.type_label || attachTypeLabel(f.type))}</span>
+            <span class="bi-name" title="${esc(f.name)}">${esc(f.name)}</span>
+            ${f.invoice_no ? `<span class="bi-warning">发票号 ${esc(f.invoice_no)}</span>` : ''}
+            ${f.warning ? `<span class="bi-warning">${esc(f.warning)}</span>` : ''}
+          </div>`).join('')}</div>
+      </div>` : '';
+
     const ignoredRows = ignored.length ? `
       <div class="detail-section" style="margin-top:16px">
         <h3>未参与批量<span class="h3-line"></span></h3>
@@ -1743,6 +1843,7 @@ function openBatchImportPreview(scan, sourceLabel) {
       <div class="hint" style="margin-top:12px">从 <b>${esc(sourceLabel)}</b> 扫描到 <b>${scan.total_files}</b> 个候选文件。每个发票 PDF 创建一条；XML 只在能匹配到 PDF 时一起带入。</div>
       ${claimantConfirmHtml()}
       <div class="bi-groups" style="margin-top:14px">${groupRows}</div>
+      ${pendingRows}
       ${ungroupedRows}
       ${ignoredRows}`;
 
@@ -1755,27 +1856,42 @@ function openBatchImportPreview(scan, sourceLabel) {
   const selectedImportPaths = () => groups
     .filter((g) => g.selected)
     .flatMap((g) => g.files.map((f) => f.path));
+  const allPreviewPaths = () => options.cleanupPaths || [
+    ...groups.flatMap((g) => g.files.map((f) => f.path)),
+    ...ungrouped.map((f) => f.path),
+    ...ignored.map((f) => f.path),
+    ...pendingMaterialInfos.map((f) => f.path),
+  ];
+  let cleanupOnClose = allPreviewPaths;
   const m = modal({
     title: '确认导入',
     wide: true, body,
-    onClose: () => cleanupDroppedPaths(selectedImportPaths()),
+    onClose: () => cleanupDroppedPaths(cleanupOnClose()),
     footer: [
       mkBtn('取消', 'ghost', async () => {
-        await cleanupDroppedPaths(selectedImportPaths());
+        await cleanupDroppedPaths(allPreviewPaths());
         m.close();
       }),
       mkBtn('创建选中条目', 'primary', async () => {
         const payload = groups
           .filter((g) => g.selected)
-          .map((g) => ({ label: g.label, files: g.files.map((f) => ({ path: f.path, type: f.type })) }));
+          .map((g) => ({ key: g.key, label: g.label, files: g.files.map((f) => ({ path: f.path, type: f.type })) }));
         if (!payload.length) { toast('没有可创建的分组', 'err'); return; }
         try {
           const r = await Api.batchCreateEntries(selectedClaimantId(body), payload);
-          await cleanupDroppedPaths(selectedImportPaths());
+          const bind = pendingMaterialInfos.length
+            ? await autoBindMaterialInfos(pendingMaterialInfos, r.created_entries || [])
+            : { manual: [] };
+          const manualPaths = new Set((bind.manual || []).map((f) => f.path));
+          const cleanupNow = allPreviewPaths().filter((p) => !manualPaths.has(p));
+          cleanupOnClose = () => [];
+          await cleanupDroppedPaths(cleanupNow);
           m.close();
           await refreshEntries();
           if (r.failed && r.failed.length) {
             toast(`创建 ${r.created} 条，${r.failed.length} 组失败`, 'err');
+          } else if (bind.auto && bind.auto.length) {
+            toast(`已创建 ${r.created} 条，并绑定 ${bind.auto.length} 份材料`, 'ok');
           } else {
             toast(`已创建 ${r.created} 条`, 'ok');
           }
@@ -2129,9 +2245,13 @@ async function openEntryDetail(entryId) {
     };
   });
 
+  State.activeDetailEntryId = entryId;
   const mm = modal({
     title: e.seller || (e.invoice_no ? '发票 ' + e.invoice_no : '报账条目'),
     wide: true, body,
+    onClose: () => {
+      if (State.activeDetailEntryId === entryId) State.activeDetailEntryId = null;
+    },
     footer: [
       mkBtn('删除条目', 'danger', async () => {
         if (!confirm('确认删除该条目及其附件？此操作不可撤销。')) return;
@@ -2164,30 +2284,58 @@ function dragFilePath(file) {
   return file.path || file.webkitRelativePath || '';
 }
 
+function isInvoiceImportInfo(info) {
+  return info && (info.type === 'invoice_pdf' || info.type === 'invoice_xml');
+}
+
+function isLooseMaterialInfo(info) {
+  return info && ['payment_screenshot', 'inspection_pdf', 'other'].includes(info.type);
+}
+
+async function materialInfosForPaths(paths) {
+  const infos = await Api.classifyMaterialFiles(paths || []);
+  return (infos || []).map((info) => ({
+    ...info,
+    type: info.type || classifyAttachmentByName(info.path || info.name),
+  }));
+}
+
 async function addDroppedMaterialFiles(entryId, files) {
   if (!files.length) return false;
   const paths = await droppedFilesToPaths(files);
   try {
-    await validateDroppedMaterialsForEntry(entryId, paths);
-    let addedPayment = false;
-    for (const path of paths) {
-      const type = classifyAttachmentByName(path);
-      await Api.addAttachment(entryId, path, type);
-      if (type === 'payment_screenshot') addedPayment = true;
-    }
-    if (addedPayment) await maybeSetPaidFromInvoice(entryId);
+    const infos = await materialInfosForPaths(paths);
+    await addMaterialInfosToEntry(entryId, infos);
   } finally {
     await cleanupDroppedPaths(paths);
   }
   return true;
 }
 
-async function validateDroppedMaterialsForEntry(entryId, paths) {
+async function addMaterialInfosToEntry(entryId, infos) {
+  await validateDroppedMaterialsForEntry(entryId, infos);
+  const paymentInfos = [];
+  for (const info of infos) {
+    const options = info.type === 'payment_screenshot' ? { apply_payment_ocr: false } : null;
+    const att = await Api.addAttachment(entryId, info.path, info.type, '', options);
+    if (info.type === 'payment_screenshot') {
+      paymentInfos.push({
+        ...info,
+        paid_amount: info.paid_amount || att.payment_ocr?.paid_amount || '',
+      });
+    }
+  }
+  const message = await settlePaymentAmountAfterAdd(entryId, paymentInfos);
+  return { message };
+}
+
+async function validateDroppedMaterialsForEntry(entryId, infos) {
   const entry = await Api.getEntry(entryId);
   const wrongInvoices = [];
   const unconfirmedInvoices = [];
-  for (const path of paths) {
-    const type = classifyAttachmentByName(path);
+  for (const info of infos) {
+    const path = info.path;
+    const type = info.type || classifyAttachmentByName(path);
     if (type !== 'invoice_pdf' && type !== 'invoice_xml') continue;
     try {
       const result = type === 'invoice_xml'
@@ -2209,6 +2357,47 @@ async function validateDroppedMaterialsForEntry(entryId, paths) {
   if (unconfirmedInvoices.length) {
     throw new Error(`无法确认发票是否属于当前条目：${unconfirmedInvoices.join('、')}。请用“替换”或从主界面导入。`);
   }
+}
+
+async function autoBindMaterialInfos(infos, extraEntries = []) {
+  const existing = await Api.listEntries({});
+  const byId = new Map();
+  for (const entry of [...(extraEntries || []), ...existing]) {
+    const id = entry.entry_id || entry.id;
+    if (id) byId.set(id, entry);
+  }
+  const allEntries = [...byId.values()];
+  const auto = [];
+  const manual = [];
+
+  for (const info of infos) {
+    if (info.type === 'inspection_pdf' && info.invoice_no) {
+      const matches = allEntries.filter((entry) => entry.invoice_no === info.invoice_no);
+      if (matches.length === 1) {
+        auto.push({ info, entryId: matches[0].entry_id || matches[0].id });
+        continue;
+      }
+    }
+    manual.push(info);
+  }
+
+  for (const item of auto) {
+    await Api.addAttachment(item.entryId, item.info.path, item.info.type);
+  }
+  if (manual.length) openAttachDroppedFiles(manual.map((info) => info.path), { infos: manual });
+  return { auto: auto.map((item) => item.info), manual };
+}
+
+async function handleLooseMaterialInfos(infos, cleanupPaths) {
+  if (!infos.length) return false;
+  const bind = await autoBindMaterialInfos(infos);
+  const manualPaths = new Set(bind.manual.map((info) => info.path));
+  await cleanupDroppedPaths((cleanupPaths || infos.map((info) => info.path)).filter((p) => !manualPaths.has(p)));
+  if (bind.auto.length) {
+    await refreshEntries();
+    toast(`已自动绑定 ${bind.auto.length} 份查验单`, 'ok');
+  }
+  return true;
 }
 
 function readFileAsDataURL(file) {
@@ -2258,19 +2447,6 @@ function setupMaterialDrop(zone, entryId, onDone) {
   };
 }
 
-function isInvoiceImportFile(path) {
-  const n = String(path || '').toLowerCase();
-  if (n.endsWith('.xml')) return true;
-  if (!n.endsWith('.pdf')) return false;
-  return !(path.includes('查验') || path.includes('验真'));
-}
-
-function isAttachableMaterialFile(path) {
-  const n = String(path || '').toLowerCase();
-  if (/\.(jpg|jpeg|png|webp|bmp|gif)$/i.test(n)) return true;
-  return n.endsWith('.pdf') && (path.includes('查验') || path.includes('验真'));
-}
-
 function setupGlobalDrop() {
   let hideTimer = null;
   const hasFiles = (dt) => dt && Array.from(dt.types || []).includes('Files');
@@ -2302,23 +2478,32 @@ function setupGlobalDrop() {
     hideDragOverlay();
     if (ev.target instanceof Element && ev.target.closest('.entry-card, .material-drop, .modal-mask')) return;
     let paths = [];
+    let infos = [];
     try { paths = await droppedFilesToPaths([...ev.dataTransfer.files]); }
     catch (e) { toast(e.message || '读取拖入文件失败', 'err'); return; }
-    const invoicePaths = paths.filter(isInvoiceImportFile);
-    const materialPaths = paths.filter(isAttachableMaterialFile);
-    if (invoicePaths.length) {
+    try { infos = await materialInfosForPaths(paths); }
+    catch (e) { await cleanupDroppedPaths(paths); toast(e.message || '识别拖入材料失败', 'err'); return; }
+    const invoiceInfos = infos.filter(isInvoiceImportInfo);
+    const materialInfos = infos.filter(isLooseMaterialInfo);
+    if (invoiceInfos.length) {
       try {
-        const scan = await Api.scanFiles(invoicePaths);
-        openBatchImportPreview(scan, `${invoicePaths.length} 个拖入文件`);
-        if (materialPaths.length) toast('付款截图和查验单请绑定到条目', 'err');
+        const scan = await Api.scanFiles(invoiceInfos.map((info) => info.path));
+        openBatchImportPreview(scan, `${invoiceInfos.length} 个拖入文件`, {
+          pendingMaterialInfos: materialInfos,
+          cleanupPaths: paths,
+        });
       } catch (e) {
         await cleanupDroppedPaths(paths);
         toast('扫描失败：' + e.message, 'err');
       }
       return;
     }
-    if (materialPaths.length) {
-      openAttachDroppedFiles(materialPaths);
+    if (materialInfos.length) {
+      try { await handleLooseMaterialInfos(materialInfos, paths); }
+      catch (e) {
+        await cleanupDroppedPaths(paths);
+        toast(e.message, 'err');
+      }
       return;
     }
     await cleanupDroppedPaths(paths);
@@ -2331,6 +2516,63 @@ function setupGlobalDrop() {
   window.addEventListener('blur', () => {
     clearTimeout(hideTimer);
     hideDragOverlay();
+  });
+}
+
+function filesFromClipboard(ev) {
+  const dt = ev.clipboardData;
+  if (!dt) return [];
+  const out = [];
+  const seen = new Set();
+  for (const file of [...(dt.files || [])]) {
+    const key = `${file.name}:${file.size}:${file.type}`;
+    if (!seen.has(key)) { seen.add(key); out.push(file); }
+  }
+  for (const item of [...(dt.items || [])]) {
+    if (item.kind !== 'file') continue;
+    const file = item.getAsFile();
+    if (!file) continue;
+    const key = `${file.name}:${file.size}:${file.type}`;
+    if (!seen.has(key)) { seen.add(key); out.push(file); }
+  }
+  return out;
+}
+
+function setupClipboardUpload() {
+  document.addEventListener('paste', async (ev) => {
+    const files = filesFromClipboard(ev);
+    if (!files.length) return;
+    ev.preventDefault();
+    const activeEntryId = State.activeDetailEntryId;
+    let paths = [];
+    try {
+      paths = await droppedFilesToPaths(files);
+      const infos = await materialInfosForPaths(paths);
+      if (activeEntryId) {
+        await addMaterialInfosToEntry(activeEntryId, infos);
+        await cleanupDroppedPaths(paths);
+        await refreshEntries();
+        toast(`已从剪切板添加 ${infos.length} 份材料`, 'ok');
+        return;
+      }
+      const invoiceInfos = infos.filter(isInvoiceImportInfo);
+      const materialInfos = infos.filter(isLooseMaterialInfo);
+      if (invoiceInfos.length) {
+        const scan = await Api.scanFiles(invoiceInfos.map((info) => info.path));
+        openBatchImportPreview(scan, `剪切板 ${invoiceInfos.length} 个文件`, {
+          pendingMaterialInfos: materialInfos,
+          cleanupPaths: paths,
+        });
+      } else if (materialInfos.length) {
+        await handleLooseMaterialInfos(materialInfos, paths);
+      } else {
+        await cleanupDroppedPaths(paths);
+        toast('剪切板里没有可导入的发票或材料', 'err');
+      }
+    } catch (e) {
+      await cleanupDroppedPaths(paths);
+      toast(e.message || '读取剪切板失败', 'err');
+    }
   });
 }
 
@@ -2351,32 +2593,39 @@ function hideDragOverlay() {
   if (ov) ov.remove();
 }
 
-async function openAttachDroppedFiles(paths) {
+async function openAttachDroppedFiles(paths, options = {}) {
+  const infos = options.infos || paths.map((path) => ({
+    path,
+    name: baseName(path),
+    type: classifyAttachmentByName(path),
+    type_label: attachTypeLabel(classifyAttachmentByName(path)),
+  }));
+  const cleanupPaths = options.cleanupPaths || paths;
   if (!State.currentProfileId) {
-    await cleanupDroppedPaths(paths);
+    await cleanupDroppedPaths(cleanupPaths);
     toast('请先创建报账人', 'err');
     return;
   }
   let entries = [];
   try { entries = await Api.listEntries({}); }
   catch (e) {
-    await cleanupDroppedPaths(paths);
+    await cleanupDroppedPaths(cleanupPaths);
     toast(e.message, 'err');
     return;
   }
   if (!entries.length) {
-    await cleanupDroppedPaths(paths);
+    await cleanupDroppedPaths(cleanupPaths);
     toast('还没有可绑定的条目', 'err');
     return;
   }
 
   const body = el('div');
-  const rows = paths.map((p, idx) => `
+  const rows = infos.map((info, idx) => `
     <div class="drop-bind-row">
-      <span class="attach-name" title="${esc(p)}">${esc(baseName(p))}</span>
+      <span class="attach-name" title="${esc(info.path)}">${esc(info.name || baseName(info.path))}${info.invoice_no ? ` · ${esc(info.invoice_no)}` : ''}</span>
       <select data-drop-type="${idx}">
         ${ATTACHMENT_TYPE_OPTS.filter(([v]) => ['payment_screenshot', 'inspection_pdf', 'other'].includes(v))
-          .map(([v, l]) => `<option value="${v}"${v === classifyAttachmentByName(p) ? ' selected' : ''}>${l}</option>`).join('')}
+          .map(([v, l]) => `<option value="${v}"${v === info.type ? ' selected' : ''}>${l}</option>`).join('')}
       </select>
     </div>`).join('');
   body.innerHTML = `
@@ -2390,26 +2639,24 @@ async function openAttachDroppedFiles(paths) {
   const m = modal({
     title: '绑定材料',
     body,
-    onClose: () => cleanupDroppedPaths(paths),
+    onClose: () => cleanupDroppedPaths(cleanupPaths),
     footer: [
       mkBtn('取消', 'ghost', async () => {
-        await cleanupDroppedPaths(paths);
+        await cleanupDroppedPaths(cleanupPaths);
         m.close();
       }),
       mkBtn('添加到条目', 'primary', async () => {
         const entryId = body.querySelector('#dropEntry').value;
         try {
-          let addedPayment = false;
-          for (const [idx, path] of paths.entries()) {
-            const type = body.querySelector(`[data-drop-type="${idx}"]`).value;
-            await Api.addAttachment(entryId, path, type);
-            if (type === 'payment_screenshot') addedPayment = true;
-          }
-          if (addedPayment) await maybeSetPaidFromInvoice(entryId);
-          await cleanupDroppedPaths(paths);
+          const selectedInfos = infos.map((info, idx) => ({
+            ...info,
+            type: body.querySelector(`[data-drop-type="${idx}"]`).value,
+          }));
+          const result = await addMaterialInfosToEntry(entryId, selectedInfos);
+          await cleanupDroppedPaths(cleanupPaths);
           m.close();
           await refreshEntries();
-          toast('材料已添加', 'ok');
+          toast(result.message || '材料已添加', 'ok');
         } catch (e) { toast(e.message, 'err'); }
       }),
     ],
@@ -2443,10 +2690,16 @@ async function addAttachmentFlow(entryId, parentModal, presetType) {
           const res = await Api.pickFiles(type === 'payment_screenshot');
           const paths = res.paths || [];
           if (!paths.length) return;
-          for (const p of paths) await Api.addAttachment(entryId, p, type);
-          if (type === 'payment_screenshot') await maybeSetPaidFromInvoice(entryId);
-          m.close(); parentModal.close(); openEntryDetail(entryId); await refreshEntries();
-          toast('附件已添加', 'ok');
+          if (type === 'payment_screenshot') {
+            const infos = (await materialInfosForPaths(paths)).map((info) => ({ ...info, type }));
+            const result = await addMaterialInfosToEntry(entryId, infos);
+            m.close(); parentModal.close(); openEntryDetail(entryId); await refreshEntries();
+            toast(result.message || '附件已添加', 'ok');
+          } else {
+            for (const p of paths) await Api.addAttachment(entryId, p, type);
+            m.close(); parentModal.close(); openEntryDetail(entryId); await refreshEntries();
+            toast('附件已添加', 'ok');
+          }
         } catch (err) { toast(err.message, 'err'); }
       }),
     ],

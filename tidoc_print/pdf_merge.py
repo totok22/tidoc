@@ -102,6 +102,7 @@ def images_to_pdf(image_paths: list[str | Path], out_path: str | Path,
     slot_h = page_h - 2 * margin - footer_h
     from reportlab.lib.utils import ImageReader
 
+    total_pages = (len(image_paths) + 1) // 2
     for page_index, start in enumerate(range(0, len(image_paths), 2), start=1):
         buf = io.BytesIO()
         c = canvas.Canvas(buf, pagesize=(page_w, page_h))
@@ -123,7 +124,7 @@ def images_to_pdf(image_paths: list[str | Path], out_path: str | Path,
             if note:
                 _draw_label(c, note, slot_x + slot_w / 2, margin + 3 * mm,
                             font_size=10, align="center")
-        _draw_label(c, _footer_text(batch_note, f"第{page_index}页"),
+        _draw_label(c, _footer_text(batch_note, f"Page {page_index}/{total_pages}"),
                     page_w - margin, 6 * mm, font_size=10)
         c.save()
         buf.seek(0)

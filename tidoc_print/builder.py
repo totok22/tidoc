@@ -119,7 +119,7 @@ def build_print_package(
                 total_images = len(e.payment_images)
                 for img_idx, img in enumerate(e.payment_images, start=1):
                     imgs.append(img)
-                    annos.append(f"第{entry_idx}份-{img_idx}/{total_images}" if options.annotate else "")
+                    annos.append(f"No.{entry_idx}-{img_idx}/{total_images}" if options.annotate else "")
             if imgs:
                 out = images_to_pdf(
                     imgs,

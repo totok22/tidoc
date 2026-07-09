@@ -197,6 +197,45 @@ def test_attachment_duplicate_rejected(repos, sample_xmls):
         repos["attachments"].add(eid, sample_xmls[0], TYPE_PAYMENT)
 
 
+def test_api_applies_payment_ocr_amount(api, sample_xmls, tmp_path, monkeypatch):
+    from tidoc.services import folder_import
+
+    p = api.create_profile("张三", "李老师")["data"]
+    e = api.create_entry(p["id"], xml_path=sample_xmls[0])["data"]
+    payment = tmp_path / "付款截图.jpg"
+    payment.write_bytes(b"fake image")
+
+    monkeypatch.setattr(folder_import, "extract_payment_image_amount", lambda path: "27.00")
+    res = api.add_attachment(e["id"], str(payment), "payment_screenshot")["data"]
+
+    assert res["payment_ocr"] == {"paid_amount": "27.00", "applied": True}
+    updated = api.get_entry(e["id"])["data"]
+    assert updated["fields"]["paid_amount"]["current"] == "27.00"
+    assert updated["fields"]["paid_amount"]["modified"] is True
+
+
+def test_api_can_recognize_payment_ocr_without_applying(api, sample_xmls, tmp_path, monkeypatch):
+    from tidoc.services import folder_import
+
+    p = api.create_profile("张三", "李老师")["data"]
+    e = api.create_entry(p["id"], xml_path=sample_xmls[0])["data"]
+    before = e["fields"]["paid_amount"]["current"]
+    payment = tmp_path / "付款截图.jpg"
+    payment.write_bytes(b"fake image")
+
+    monkeypatch.setattr(folder_import, "extract_payment_image_amount", lambda path: "27.00")
+    res = api.add_attachment(
+        e["id"],
+        str(payment),
+        "payment_screenshot",
+        options={"apply_payment_ocr": False},
+    )["data"]
+
+    assert res["payment_ocr"] == {"paid_amount": "27.00", "applied": False}
+    updated = api.get_entry(e["id"])["data"]
+    assert updated["fields"]["paid_amount"]["current"] == before
+
+
 def test_dropped_file_cleanup(api):
     payload = base64.b64encode(b"temporary").decode()
     saved = api.save_dropped_files([{"name": "a.pdf", "data_url": f"data:application/pdf;base64,{payload}"}])["data"]

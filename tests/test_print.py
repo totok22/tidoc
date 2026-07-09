@@ -57,9 +57,12 @@ def test_images_to_pdf_two_per_page(tmp_path):
     from tidoc_print.pdf_merge import images_to_pdf
     from pypdf import PdfReader
     imgs = (_sample("*付款截图.jpg") * 2)[:3]
-    out = images_to_pdf(imgs, tmp_path / "pay3.pdf", annotations=["第1份-1/3", "第1份-2/3", "第1份-3/3"])
+    out = images_to_pdf(imgs, tmp_path / "pay3.pdf", annotations=["No.1-1/3", "No.1-2/3", "No.1-3/3"])
     assert out.exists()
-    assert len(PdfReader(str(out)).pages) == 2
+    reader = PdfReader(str(out))
+    assert len(reader.pages) == 2
+    text = "\n".join(page.extract_text() or "" for page in reader.pages)
+    assert "Page 1/2" in text
 
 
 def test_generate_word_docs(tmp_path):

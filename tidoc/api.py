@@ -15,6 +15,7 @@ import sys
 import time
 import webbrowser
 import uuid
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 from tidoc import __version__
@@ -152,6 +153,7 @@ class Api:
             self.attachments.add(entry_id, pdf_path, TYPE_INVOICE_PDF)
         for pp in (payment_paths or []):
             self.attachments.add(entry_id, pp, TYPE_PAYMENT)
+            self._maybe_apply_payment_ocr_amount(entry_id, pp)
         if inspection_path:
             self.attachments.add(entry_id, inspection_path, TYPE_INSPECTION)
 
@@ -207,6 +209,58 @@ class Api:
         return {"deleted": deleted}
 
     @_guard
+    def classify_material_files(self, paths):
+        """识别拖拽/粘贴材料的类型，并尽量提取发票号用于自动绑定。"""
+        from .db import TYPE_INSPECTION, TYPE_INVOICE_PDF, TYPE_INVOICE_XML, TYPE_PAYMENT
+        from .engine import parse_invoice_files
+        from .services.folder_import import (
+            classify_pdf_attachment_type,
+            extract_payment_image_amount,
+            extract_pdf_invoice_no,
+        )
+
+        image_ext = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif"}
+        out = []
+        for raw in (paths or []):
+            path = Path(raw)
+            suffix = path.suffix.lower()
+            att_type = "other"
+            invoice_no = ""
+            paid_amount = ""
+            warning = ""
+            try:
+                if suffix == ".xml":
+                    att_type = TYPE_INVOICE_XML
+                    invoice_no = parse_invoice_files(xml_path=path).invoice_no or ""
+                elif suffix == ".pdf":
+                    att_type = classify_pdf_attachment_type(path)
+                    if att_type == TYPE_INSPECTION:
+                        invoice_no = extract_pdf_invoice_no(path)
+                        if not invoice_no:
+                            warning = "未识别到发票号码"
+                elif suffix in image_ext:
+                    att_type = TYPE_PAYMENT
+                    paid_amount = extract_payment_image_amount(path)
+            except Exception as exc:  # noqa: BLE001 - 分类阶段只提示，后续添加时仍会校验
+                warning = str(exc)
+            out.append({
+                "path": str(path),
+                "name": path.name,
+                "type": att_type,
+                "type_label": {
+                    TYPE_INVOICE_PDF: "发票 PDF",
+                    TYPE_INVOICE_XML: "发票 XML",
+                    TYPE_INSPECTION: "查验单 PDF",
+                    TYPE_PAYMENT: "付款截图",
+                    "other": "其他",
+                }.get(att_type, att_type),
+                "invoice_no": invoice_no,
+                "paid_amount": paid_amount,
+                "warning": warning,
+            })
+        return out
+
+    @_guard
     def batch_create_entries(self, profile_id, groups, title=""):
         """按前端确认后的分组批量创建条目。
 
@@ -216,7 +270,7 @@ class Api:
         from .engine import check_invoice, parse_invoice_files
         from .db import TYPE_INVOICE_PDF, TYPE_INVOICE_XML
 
-        created, failed = [], []
+        created, created_entries, failed = [], [], []
         for g in (groups or []):
             files = g.get("files") or []
             invoice_files = [f for f in files if f.get("type") == TYPE_INVOICE_PDF]
@@ -243,9 +297,15 @@ class Api:
                     self.attachments.add(entry_id, f["path"], TYPE_INVOICE_XML)
                 self.entries.recompute_status(entry_id)
                 created.append(entry_id)
+                created_entries.append({
+                    "group": g.get("key") or g.get("label") or "",
+                    "label": g.get("label") or "",
+                    "entry_id": entry_id,
+                    "invoice_no": parsed.invoice_no or "",
+                })
             except Exception as exc:  # noqa: BLE001 — 单组失败不阻断其余
                 failed.append({"group": g.get("label") or g.get("key") or "?", "error": str(exc)})
-        return {"created": len(created), "entry_ids": created, "failed": failed}
+        return {"created": len(created), "entry_ids": created, "created_entries": created_entries, "failed": failed}
 
     # ------------------------------------------------------------ 条目管理
     @_guard
@@ -364,9 +424,20 @@ class Api:
 
     # ------------------------------------------------------------ 附件
     @_guard
-    def add_attachment(self, entry_id, src_path, att_type, note=""):
+    def add_attachment(self, entry_id, src_path, att_type, note="", options=None):
+        from .db import TYPE_PAYMENT
+
+        options = options or {}
         self._validate_attachment_for_entry(entry_id, src_path, att_type)
         att = self.attachments.add(entry_id, src_path, att_type, note)
+        if att_type == TYPE_PAYMENT:
+            amount, applied = self._maybe_apply_payment_ocr_amount(
+                entry_id,
+                src_path,
+                apply=options.get("apply_payment_ocr", True),
+            )
+            if amount:
+                att["payment_ocr"] = {"paid_amount": amount, "applied": applied}
         self.entries.recompute_status(entry_id)
         return att
 
@@ -449,6 +520,25 @@ class Api:
             invoice_no = extract_pdf_invoice_no(path)
             if invoice_no:
                 _validate_same_invoice(entry, invoice_no, path.name)
+
+    def _maybe_apply_payment_ocr_amount(self, entry_id, src_path, apply: bool = True) -> tuple[str, bool]:
+        from .services.folder_import import extract_payment_image_amount
+
+        amount = extract_payment_image_amount(src_path)
+        if not amount:
+            return "", False
+        if not apply:
+            return amount, False
+        entry = self.entries.get(entry_id)
+        if not entry:
+            return amount, False
+        fields = entry.get("fields") or {}
+        current = ((fields.get("paid_amount") or {}).get("current") or "").strip()
+        total = str(entry.get("total") or "").strip()
+        if current and total and not _same_money(current, total):
+            return amount, False
+        self.entries.update_field(entry_id, "paid_amount", amount, entry["profile_id"])
+        return amount, True
 
     @_guard
     def open_attachment(self, att_id):
@@ -724,6 +814,13 @@ def _validate_same_invoice(entry: dict, invoice_no: str, filename: str) -> None:
     expected = entry.get("invoice_no") or ""
     if expected and invoice_no and invoice_no != expected:
         raise ValueError(f"这份材料不属于当前条目：{filename}。识别到发票号 {invoice_no}，当前条目是 {expected}。")
+
+
+def _same_money(a: str, b: str) -> bool:
+    try:
+        return Decimal(str(a)).quantize(Decimal("0.01")) == Decimal(str(b)).quantize(Decimal("0.01"))
+    except (InvalidOperation, ValueError):
+        return str(a).strip() == str(b).strip()
 
 
 def _reveal_local_path(path: str | Path) -> None:
