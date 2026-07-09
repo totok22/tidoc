@@ -32,14 +32,34 @@ def _footer_text(batch_note: str, text: str) -> str:
     return f"{batch_note}  {text}" if batch_note else text
 
 
+def _draw_label(c, text: str, anchor_x: float, baseline_y: float,
+                font_size: float = 11, align: str = "right") -> None:
+    """在锚点处画标注：先铺白色不透明底框盖住底层内容，再写字。
+    align="right" 时 anchor_x 为右边界；align="center" 时 anchor_x 为水平中心。"""
+    font = _CJK_FONT if _FONT_OK else "Helvetica"
+    text_w = pdfmetrics.stringWidth(text, font, font_size)
+    pad_x, pad_y = 2.2 * mm, 1.4 * mm
+    box_x = anchor_x - text_w / 2 - pad_x if align == "center" else anchor_x - text_w - pad_x
+    box_y = baseline_y - pad_y
+    box_w = text_w + 2 * pad_x
+    box_h = font_size + 2 * pad_y
+    # 白底框：遮住底层单据原有内容，避免叠字重影
+    c.setFillColorRGB(1, 1, 1)
+    c.rect(box_x, box_y, box_w, box_h, stroke=0, fill=1)
+    c.setFont(font, font_size)
+    c.setFillColorRGB(0.1, 0.1, 0.1)
+    if align == "center":
+        c.drawCentredString(anchor_x, baseline_y, text)
+    else:
+        c.drawRightString(anchor_x, baseline_y, text)
+
+
 def _annotation_overlay(text: str, pagesize=A4) -> PdfReader:
-    """生成一张只含页脚标注文字的透明 PDF 页，供叠加。"""
+    """生成一张只含标注文字的叠加页：右下角带白底框。"""
     buf = io.BytesIO()
     c = canvas.Canvas(buf, pagesize=pagesize)
     width, _ = pagesize
-    c.setFont(_CJK_FONT if _FONT_OK else "Helvetica", 8)
-    c.setFillColorRGB(0.1, 0.1, 0.1)
-    c.drawRightString(width - 10 * mm, 7 * mm, text)
+    _draw_label(c, text, width - 10 * mm, 7 * mm)
     c.save()
     buf.seek(0)
     return PdfReader(buf)
@@ -58,7 +78,7 @@ def merge_pdfs(pdf_paths: list[str | Path], out_path: str | Path,
         for page_idx, page in enumerate(reader.pages, start=1):
             # 先把页加进 writer，再对 writer 内的页做叠加（pypdf 推荐做法，避免不可靠）
             added = writer.add_page(page)
-            label = _footer_text(batch_note, f"第{idx + 1}份-{page_idx}/{total_pages}") if numbered else note
+            label = _footer_text(batch_note, f"No.{idx + 1}-{page_idx}/{total_pages}") if numbered else note
             if label:
                 box = added.mediabox
                 overlay = _annotation_overlay(label, (float(box.width), float(box.height)))
@@ -101,12 +121,10 @@ def images_to_pdf(image_paths: list[str | Path], out_path: str | Path,
                 c.drawImage(ImageReader(tmp), x, y, width=draw_w, height=draw_h)
             note = annotations[idx] if annotations and idx < len(annotations) else ""
             if note:
-                c.setFont(_CJK_FONT if _FONT_OK else "Helvetica", 8)
-                c.setFillColorRGB(0.1, 0.1, 0.1)
-                c.drawRightString(slot_x + slot_w, margin + 3 * mm, note)
-        c.setFont(_CJK_FONT if _FONT_OK else "Helvetica", 8)
-        c.setFillColorRGB(0.1, 0.1, 0.1)
-        c.drawRightString(page_w - margin, 6 * mm, _footer_text(batch_note, f"第{page_index}页"))
+                _draw_label(c, note, slot_x + slot_w / 2, margin + 3 * mm,
+                            font_size=10, align="center")
+        _draw_label(c, _footer_text(batch_note, f"第{page_index}页"),
+                    page_w - margin, 6 * mm, font_size=10)
         c.save()
         buf.seek(0)
         for page in PdfReader(buf).pages:

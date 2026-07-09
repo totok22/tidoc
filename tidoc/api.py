@@ -53,6 +53,22 @@ class Api:
         self._window = None
         _cleanup_old_dropped_files(self.data_root.dropped_dir)
 
+    def __dir__(self):
+        """只向 pywebview 暴露本类定义的公开方法。
+
+        pywebview 6.x 会用 dir() 枚举并递归进入公开属性，若不限制，会把
+        self.db / self.profiles / self.data_root 等仓储对象（乃至 Path.unlink
+        等文件系统方法）全部当成 JS API 暴露：既有安全隐患，又让注入体积暴涨、
+        拖慢桥就绪，导致前端首个调用报「后端方法不存在」。
+        """
+        internal = {"bind_window"}
+        return [
+            name for name in vars(type(self))
+            if not name.startswith("_")
+            and name not in internal
+            and callable(getattr(type(self), name))
+        ]
+
     def bind_window(self, window) -> None:
         self._window = window
 

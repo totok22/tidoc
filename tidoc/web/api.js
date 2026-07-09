@@ -6,12 +6,23 @@ const Api = (() => {
 
   function waitReady() {
     if (ready) return ready;
+    // 桥就绪判定：api 对象存在且已挂上方法。pywebview 会先注入空的 api={}，
+    // 待 _createApi 执行后才填充函数，故不能只判断 api 存在（空对象也为真）。
+    const bridgeReady = () =>
+      window.pywebview && window.pywebview.api &&
+      typeof window.pywebview.api.list_profiles === 'function';
     ready = new Promise((resolve) => {
-      if (window.pywebview && window.pywebview.api) return resolve();
-      window.addEventListener('pywebviewready', () => resolve(), { once: true });
+      if (bridgeReady()) return resolve();
+      window.addEventListener('pywebviewready', () => {
+        // ready 事件后方法即已注入，但保险起见再轮询确认
+        if (bridgeReady()) return resolve();
+        const t0 = setInterval(() => {
+          if (bridgeReady()) { clearInterval(t0); resolve(); }
+        }, 30);
+      }, { once: true });
       // 兜底轮询（某些平台事件时机不稳）
       const t = setInterval(() => {
-        if (window.pywebview && window.pywebview.api) {
+        if (bridgeReady()) {
           clearInterval(t);
           resolve();
         }

@@ -2623,7 +2623,8 @@ async function openPrintDialog(ids) {
 
     genBtn.disabled = true; genBtn.textContent = '生成中…';
     try {
-      const name = '打印件-' + new Date().toISOString().slice(0, 10);
+      const stamp = new Date().toLocaleString('sv').replace(/[: ]/g, '-').replace('T', '_');
+      const name = '打印件-' + stamp;
       const r = await Api.buildPrints(ids, options, name);
       m.close();
       showPrintResult(r.results);
