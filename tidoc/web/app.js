@@ -42,7 +42,8 @@ const TITLE_CLASS = { '北京理工大学': 'univ', '北京理工大学教育基
 const TITLE_SHORT = { '北京理工大学': '北京理工大学', '北京理工大学教育基金会': '教育基金会' };
 const STATUS_LABEL = { draft: '草稿', partial: '部分材料', complete: '完整' };
 const CHECK_LABEL = { pass: '校验通过', warning: '识别提醒', blocked: '严重问题' };
-const FIRST_USE_GUIDE_KEY = 'tidoc.firstUseGuide.v1';
+const LEGACY_FIRST_USE_GUIDE_KEY = 'tidoc.firstUseGuide.v1';
+const USAGE_GUIDE_KEY_PREFIX = 'tidoc.usageGuide.seen.';
 const MULTI_CLAIMANT_KEY = 'tidoc.multiClaimantMode';
 const OPERATOR_PREF_KEYS = {
   name: 'tidoc.operator.name',
@@ -1459,7 +1460,7 @@ async function openSettings() {
 
   body.querySelector('#setProfilesManage').onclick = () => { m.close(); openProfileManager(false); };
   body.querySelector('#setUpdate').onclick = () => { m.close(); openUpdateDialog(); };
-  body.querySelector('#setGuide').onclick = () => { m.close(); openUsageGuide(false); };
+  body.querySelector('#setGuide').onclick = async () => { m.close(); openUsageGuide(false, await usageGuideSeenKey()); };
   body.querySelector('#setRepo').onclick = () => Api.openExternalUrl(appInfo.repository).catch((e) => toast(e.message, 'err'));
   body.querySelector('#setRepoLogo').onclick = () => Api.openExternalUrl(appInfo.repository).catch((e) => toast(e.message, 'err'));
   body.querySelector('#setOpenData').onclick = () => Api.openPath(paths.root).catch((e) => toast(e.message, 'err'));
@@ -1581,39 +1582,53 @@ async function openUpdateDialog() {
 
 async function maybeShowFirstUseGuide() {
   if (!State.profiles.length) return;
-  let seen = localStorage.getItem(FIRST_USE_GUIDE_KEY);
+  const seenKey = await usageGuideSeenKey();
+  let seen = localStorage.getItem(seenKey);
   try {
-    seen = seen || await Api.appPreference(FIRST_USE_GUIDE_KEY, '');
-    if (seen) localStorage.setItem(FIRST_USE_GUIDE_KEY, '1');
+    seen = seen || await Api.appPreference(seenKey, '');
+    if (seen) localStorage.setItem(seenKey, '1');
   } catch (e) {}
   if (seen) return;
   if ($('#modalRoot').lastChild) return;
   setTimeout(() => {
-    if (!$('#modalRoot').lastChild && !localStorage.getItem(FIRST_USE_GUIDE_KEY)) {
-      openUsageGuide(true);
+    if (!$('#modalRoot').lastChild && !localStorage.getItem(seenKey)) {
+      openUsageGuide(true, seenKey);
     }
   }, 450);
 }
 
-function openUsageGuide(firstRun) {
+async function usageGuideSeenKey() {
+  try {
+    const info = await Api.appInfo();
+    return `${USAGE_GUIDE_KEY_PREFIX}${info.version || 'unknown'}`;
+  } catch (e) {
+    return `${USAGE_GUIDE_KEY_PREFIX}unknown`;
+  }
+}
+
+function openUsageGuide(firstRun, seenKey = LEGACY_FIRST_USE_GUIDE_KEY) {
   const body = el('div');
   body.innerHTML = `
     <div class="guide-steps">
       <div>
-        <b>1. 导入发票</b>
-        <span>拖入 PDF，或用批量导入处理一组发票。XML 可辅助识别。</span>
+        <b>1. 录入发票</b>
+        <span>拖入、粘贴或批量选择发票 PDF；有 XML 时一并导入，提高识别准确度。</span>
       </div>
       <div>
-        <b>2. 补齐材料</b>
-        <span>把付款截图、查验单拖到条目卡片，或在条目里添加。</span>
+        <b>2. 补材料</b>
+        <span>付款截图和查验单直接拖到条目卡片；粘贴混合材料时，能匹配发票号的会自动归入对应条目。</span>
       </div>
       <div>
-        <b>3. 筛选检查</b>
-        <span>用待补材料、识别提醒、抬头、报账人缩小范围。</span>
+        <b>3. 查缺漏</b>
+        <span>用待补材料、识别提醒、严重问题和抬头筛选，把缺付款、缺查验单、识别异常的条目先处理完。</span>
       </div>
       <div>
         <b>4. 批量处理</b>
-        <span>框选或用快捷键选中条目后，再汇总、导出、打印或装入批次。</span>
+        <span>勾选条目后加入报账批次；批量导出总览 Excel、规范命名附件包，或生成打印材料。</span>
+      </div>
+      <div>
+        <b>5. 维护组件</b>
+        <span>打印导出组件在设置里安装；检查更新只在手动打开时联网，安装后按弹窗状态继续操作。</span>
       </div>
     </div>`;
   const m = modal({
@@ -1621,8 +1636,8 @@ function openUsageGuide(firstRun) {
     body,
     footer: [
       mkBtn('知道了', 'primary', () => {
-        localStorage.setItem(FIRST_USE_GUIDE_KEY, '1');
-        Api.setAppPreference(FIRST_USE_GUIDE_KEY, '1').catch(() => {});
+        localStorage.setItem(seenKey, '1');
+        Api.setAppPreference(seenKey, '1').catch(() => {});
         m.close();
       }),
     ],
