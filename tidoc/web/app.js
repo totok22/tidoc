@@ -43,7 +43,6 @@ const TITLE_CLASS = { '北京理工大学': 'univ', '北京理工大学教育基
 const TITLE_SHORT = { '北京理工大学': '北京理工大学', '北京理工大学教育基金会': '教育基金会' };
 const STATUS_LABEL = { draft: '草稿', partial: '部分材料', complete: '完整' };
 const CHECK_LABEL = { pass: '校验通过', warning: '识别提醒', blocked: '严重问题' };
-const LEGACY_FIRST_USE_GUIDE_KEY = 'tidoc.firstUseGuide.v1';
 const USAGE_GUIDE_SEEN_KEY = 'tidoc.usageGuide.seen.v2';
 const MULTI_CLAIMANT_KEY = 'tidoc.multiClaimantMode';
 const AUTO_UPDATE_KEY = 'tidoc.update.autoCheck';
@@ -128,11 +127,8 @@ async function init() {
   await refreshEntries();
   await refreshTagOptions();
   showSearchHintIfEmpty();
-  if (startupUpdate?.upgraded) {
-    setTimeout(() => { openReleaseHighlights('updated', startupUpdate); }, 450);
-  } else {
-    await maybeShowFirstUseGuide();
-  }
+  if (startupUpdate?.upgraded) setTimeout(() => { openReleaseHighlights('updated', startupUpdate); }, 450);
+  else await maybeShowFirstUseGuide();
   setTimeout(() => { maybeAutoCheckUpdates(); }, 1200);
 }
 
@@ -187,23 +183,16 @@ function openReleaseHighlights(mode, data) {
   };
   const body = el('div', 'release-highlights');
   body.innerHTML = `
-    <div class="release-kicker">${available ? 'NEW VERSION' : 'UPDATE COMPLETE'}</div>
     <div class="release-heading">
       <span class="release-version">v${esc(version || '')}</span>
-      <div><b>${available ? '新版本已经可以使用' : 'tidoc 已更新完成'}</b><span>${available ? `当前 v${esc(data.current_version || '未知')}，可选择现在更新或稍后处理。` : `已从 v${esc(data.previous_version || '旧版本')} 更新，数据与材料保持原位。`}</span></div>
+      <div><b>${available ? '新版本可用' : '已更新'}</b></div>
     </div>
     <div class="release-change-list">
-      <b>What’s changed</b>
+      <b>本次更新</b>
       ${notes.length
         ? `<ul>${notes.slice(0, 6).map((note) => `<li>${esc(note)}</li>`).join('')}</ul>`
-        : '<p>本次包含稳定性、性能与交互细节改进。</p>'}
-    </div>
-    <details class="release-quick-start">
-      <summary>快速开始与常用路径</summary>
-      <div class="release-workflow">
-        <span><i>1</i>导入发票</span><span><i>2</i>补齐材料</span><span><i>3</i>筛选复核</span><span><i>4</i>批量导出 / 打印</span>
-      </div>
-    </details>`;
+        : ''}
+    </div>`;
   let m;
   const close = () => { seen(); m.close(); };
   const footer = available
@@ -214,7 +203,6 @@ function openReleaseHighlights(mode, data) {
     : [mkBtn('继续使用', 'primary', close)];
   m = modal({
     title: available ? '发现新版本' : '更新完成',
-    subhead: '版本变化与快速开始',
     body,
     footer,
     onClose: seen,
@@ -1414,9 +1402,7 @@ async function openSettings() {
   const printBadge = printStatus.available
     ? '<span class="settings-ok">已安装</span>'
     : '<span class="settings-warn">未安装</span>';
-  const printDetail = printStatus.available
-    ? '可生成发票拼接、报账说明、验收单等打印材料。'
-    : (printStatus.missing?.length ? '缺少：' + esc(printStatus.missing.join('、')) : '可选组件，用于运营组打印。');
+  const printDetail = printStatus.available ? '打印材料' : '安装后可用';
 
   body.innerHTML = `
     <div class="settings-shell">
@@ -1495,7 +1481,6 @@ async function openSettings() {
             ${paths.is_default ? '' : '<button class="btn small ghost" id="setResetData">恢复默认位置</button>'}
             <button class="btn small ghost" id="setCleanup" ${maintenance.files ? '' : 'disabled'}>清理临时文件${maintenance.size ? ` · ${fmtBytes(maintenance.size)}` : ''}</button>
           </div>
-          <div class="hint" style="margin-top:10px">清理只会移除拖拽中转文件和旧更新包，不会删除发票材料、数据库、导出文件或待安装的更新包。</div>
         </details>
       </div>
 
@@ -1511,14 +1496,12 @@ async function openSettings() {
         <div class="settings-row is-actionable" id="setUpdate">
           <div class="settings-row-copy">
             <b>软件更新 ${(State.updateStatus?.updates || []).some((item) => item.available) ? '<span class="settings-warn">有可用更新</span>' : ''}</b>
-            <span>${autoUpdateMode ? '每天最多检查一次，不会自动下载或安装' : '仅在手动检查时联网'}</span>
           </div>
           <button class="btn small">检查更新</button>
         </div>
         <div class="settings-row">
           <div class="settings-row-copy">
-            <b>启动后自动检查</b>
-            <span>开启后会联网读取版本信息；每 24 小时最多一次</span>
+            <b>启动后检查更新</b>
           </div>
           <label class="switch-line"><input type="checkbox" id="setAutoUpdate" ${autoUpdateMode ? 'checked' : ''}/><span>${autoUpdateMode ? '已开启' : '未开启'}</span></label>
         </div>
@@ -1529,10 +1512,10 @@ async function openSettings() {
         <img src="assets/tidoc-logo-128.png" alt="" id="setRepoLogo" title="打开 GitHub 仓库" />
         <div class="settings-about-copy">
           <b>${esc(appInfo.name)} <small>v${esc(appInfo.version)}</small></b>
-          <span>报账凭证管理与整理工具 · 作者 ${esc(appInfo.author)}</span>
+          <div class="settings-credit"><button class="link-btn" id="setBitfsae">BITFSAE</button><span>出品</span></div>
           <div class="settings-about-actions">
             <button class="link-btn with-icon" id="setRepo">${wrapSvg(I.github, 14)}<span>GitHub</span></button>
-            <button class="link-btn" id="setGuide">查看使用提示</button>
+            <button class="link-btn" id="setGuide">使用提示</button>
           </div>
         </div>
       </div>
@@ -1573,7 +1556,7 @@ async function openSettings() {
       await Api.setAppPreference(AUTO_UPDATE_KEY, enabled ? '1' : '0');
       label.textContent = enabled ? '已开启' : '未开启';
       if (enabled) {
-        toast('已开启自动检查；不会自动下载或安装', 'ok');
+        toast('已开启自动检查', 'ok');
         maybeAutoCheckUpdates(true);
       } else {
         setUpdateNotice(null);
@@ -1608,7 +1591,8 @@ async function openSettings() {
 
   body.querySelector('#setProfilesManage').onclick = () => { m.close(); openProfileManager(false); };
   body.querySelector('#setUpdate').onclick = () => { m.close(); openUpdateDialog(); };
-  body.querySelector('#setGuide').onclick = async () => { m.close(); openUsageGuide(false, await usageGuideSeenKey()); };
+  body.querySelector('#setGuide').onclick = () => { m.close(); openUsageGuide(false); };
+  body.querySelector('#setBitfsae').onclick = () => Api.openExternalUrl('https://www.bitfsae.com').catch((e) => toast(e.message, 'err'));
   body.querySelector('#setRepo').onclick = () => Api.openExternalUrl(appInfo.repository).catch((e) => toast(e.message, 'err'));
   body.querySelector('#setRepoLogo').onclick = () => Api.openExternalUrl(appInfo.repository).catch((e) => toast(e.message, 'err'));
   body.querySelector('#setOpenData').onclick = () => Api.openPath(paths.root).catch((e) => toast(e.message, 'err'));
@@ -1658,7 +1642,6 @@ async function openUpdateDialog() {
   try { appInfo = await Api.appInfo(); } catch (e) {}
   const m = modal({
     title: '软件更新',
-    subhead: '保持核心程序与打印导出组件可用',
     body,
     wide: true,
     footer: [mkBtn('关闭', 'ghost', () => m.close())],
@@ -1675,10 +1658,7 @@ async function openUpdateDialog() {
         <span class="update-summary-icon">!</span>
         <div><b>暂时无法检查更新</b><span>${esc(message)}</span></div>
       </div>
-      <div class="update-fallback">
-        <div><b>也可以手动下载安装包</b><span>前往 GitHub Releases，选择适合本机的最新版。</span></div>
-        <button class="github-release-btn" data-open-release>${wrapSvg(I.github, 18)}<span>GitHub Releases</span></button>
-      </div>
+      <div class="update-fallback"><button class="github-release-btn" data-open-release>${wrapSvg(I.github, 18)}<span>GitHub Releases</span></button></div>
       <div class="update-inline-actions"><button class="btn small" data-refresh-update>重新检查</button></div>`;
     body.querySelector('[data-open-release]').onclick = openReleases;
     body.querySelector('[data-refresh-update]').onclick = () => render();
@@ -1732,7 +1712,7 @@ async function openUpdateDialog() {
         <span class="update-summary-icon">${availableItems.length ? '↓' : '✓'}</span>
         <div>
           <b>${availableItems.length ? (coreUpdate ? `tidoc v${esc(coreUpdate.latest_version)} 可用` : '有可用组件更新') : '已经是最新版本'}</b>
-          <span>${availableItems.length ? `${availableItems.length} 项可更新，下载后会校验文件完整性` : `当前 tidoc v${esc(status.current_core_version || appInfo.version)}`}</span>
+          <span>${availableItems.length ? `${availableItems.length} 项可更新` : `v${esc(status.current_core_version || appInfo.version)}`}</span>
         </div>
         <button class="btn small ghost" data-refresh-update>重新检查</button>
       </div>
@@ -1741,10 +1721,7 @@ async function openUpdateDialog() {
         ${rows || '<div class="hint warn">暂时没有适用于本机的更新包。</div>'}
       </div>
       <div id="updateOperation">${message ? `<div class="hint ok">${esc(message)}</div>` : ''}</div>
-      <div class="update-fallback">
-        <div><b>需要手动下载安装？</b><span>可前往 GitHub Releases 查看版本说明与安装包。</span></div>
-        <button class="github-release-btn" data-open-release>${wrapSvg(I.github, 18)}<span>GitHub Releases</span></button>
-      </div>`;
+      <div class="update-fallback"><button class="github-release-btn" data-open-release>${wrapSvg(I.github, 18)}<span>GitHub Releases</span></button></div>`;
     body.querySelector('[data-refresh-update]').onclick = async () => {
       setBusy('正在重新检查版本…');
       try { await render(); } catch (e) { renderError(e.message); }
@@ -1795,62 +1772,45 @@ async function openUpdateDialog() {
 }
 
 async function maybeShowFirstUseGuide() {
-  if (!State.profiles.length) return;
-  const seenKey = await usageGuideSeenKey();
-  const legacySeen = Object.keys(localStorage).some((key) => key.startsWith('tidoc.usageGuide.seen.') && localStorage.getItem(key));
-  let seen = localStorage.getItem(seenKey) || localStorage.getItem(LEGACY_FIRST_USE_GUIDE_KEY) || legacySeen;
+  if (!State.profiles.length || localStorage.getItem(USAGE_GUIDE_SEEN_KEY) || $('#modalRoot').lastChild) return;
   try {
-    seen = seen || await Api.appPreference(seenKey, '');
-    if (seen) localStorage.setItem(seenKey, '1');
-  } catch (e) {}
-  if (seen) return;
-  if ($('#modalRoot').lastChild) return;
-  setTimeout(() => {
-    if (!$('#modalRoot').lastChild && !localStorage.getItem(seenKey)) {
-      openUsageGuide(true, seenKey);
+    if (await Api.appPreference(USAGE_GUIDE_SEEN_KEY, '')) {
+      localStorage.setItem(USAGE_GUIDE_SEEN_KEY, '1');
+      return;
     }
+  } catch (e) {}
+  setTimeout(() => {
+    if (!$('#modalRoot').lastChild && !localStorage.getItem(USAGE_GUIDE_SEEN_KEY)) openUsageGuide(true);
   }, 450);
 }
 
-async function usageGuideSeenKey() {
-  return USAGE_GUIDE_SEEN_KEY;
-}
-
-function openUsageGuide(firstRun, seenKey = LEGACY_FIRST_USE_GUIDE_KEY) {
-  const body = el('div');
+function openUsageGuide(firstRun) {
+  const body = el('div', 'guide-steps');
   body.innerHTML = `
-    <div class="guide-steps">
-      <div>
-        <b>1. 录入发票</b>
-        <span>拖入、粘贴或批量选择发票 PDF；有 XML 时一并导入，提高识别准确度。</span>
-      </div>
-      <div>
-        <b>2. 补材料</b>
-        <span>付款截图和查验单直接拖到条目卡片；粘贴混合材料时，能匹配发票号的会自动归入对应条目。</span>
-      </div>
-      <div>
-        <b>3. 查缺漏</b>
-        <span>用待补材料、识别提醒、严重问题和抬头筛选，把缺付款、缺查验单、识别异常的条目先处理完。</span>
-      </div>
-      <div>
-        <b>4. 批量处理</b>
-        <span>勾选条目后加入报账批次；批量导出总览 Excel、规范命名附件包，或生成打印材料。</span>
-      </div>
-      <div>
-        <b>5. 维护组件</b>
-        <span>打印导出组件在设置里安装；自动检查默认关闭，开启后每天最多联网检查一次，不会自动下载或安装。</span>
-      </div>
-    </div>`;
-  const m = modal({
-    title: firstRun ? '快速开始' : '使用提示',
+    <div><b>导入发票</b><span>拖入、粘贴或选择发票 PDF；XML 可一并导入，帮助识别。多张发票可用“导入发票”按文件夹或多选处理。</span></div>
+    <div><b>补齐材料</b><span>付款截图、查验单直接拖到条目卡片或详情材料区。混合粘贴时，能按发票号匹配的查验单会自动归入条目。</span></div>
+    <div><b>核对条目</b><span>“待补材料”“识别提醒”“严重问题”可快速筛出需要处理的条目；实付金额和备注在详情中补充。</span></div>
+    <div><b>批量处理</b><span>勾选条目后可导出、打印、打标签或装入报账批次。按住 Shift 可连续选择；批次可留催办备注。</span></div>
+    <div><b>常用操作</b><span>右键条目打开更多操作；双击卡片进入详情。空白列表区可拖入发票，条目卡片用于绑定材料。</span></div>
+    <div><b>打印导出</b><span>导出总览、附件包或打印材料前先勾选条目；打印导出组件可在“设置 → 软件更新”安装或更新。</span></div>`;
+  let m;
+  const close = () => {
+    if (firstRun) {
+      localStorage.setItem(USAGE_GUIDE_SEEN_KEY, '1');
+      Api.setAppPreference(USAGE_GUIDE_SEEN_KEY, '1').catch(() => {});
+    }
+    m.close();
+  };
+  m = modal({
+    title: firstRun ? '开始使用' : '使用提示',
     body,
-    footer: [
-      mkBtn('知道了', 'primary', () => {
-        localStorage.setItem(seenKey, '1');
-        Api.setAppPreference(seenKey, '1').catch(() => {});
-        m.close();
-      }),
-    ],
+    footer: [mkBtn('知道了', 'primary', close)],
+    onClose: () => {
+      if (firstRun && !localStorage.getItem(USAGE_GUIDE_SEEN_KEY)) {
+        localStorage.setItem(USAGE_GUIDE_SEEN_KEY, '1');
+        Api.setAppPreference(USAGE_GUIDE_SEEN_KEY, '1').catch(() => {});
+      }
+    },
   });
 }
 
@@ -3084,10 +3044,14 @@ async function openPrintDialog(ids) {
   try { status = await Api.printComponentStatus(); } catch (e) { toast(e.message, 'err'); return; }
 
   if (!status.available) {
-    const m = modal({
+    let m;
+    m = modal({
       title: '打印导出组件未安装',
-      body: `<div class="hint warn">打印功能需要安装可选组件，当前缺少：<b>${esc((status.missing || []).join(', '))}</b>。<br/>开发阶段可运行 <code>pip install -r requirements-print.txt</code> 安装。</div>`,
-      footer: [mkBtn('知道了', 'ghost', () => m.close())],
+      body: `<div class="hint warn">安装打印导出组件后即可继续。</div>`,
+      footer: [
+        mkBtn('取消', 'ghost', () => m.close()),
+        mkBtn('安装组件', 'primary', () => { m.close(); openUpdateDialog(); }),
+      ],
     });
     return;
   }

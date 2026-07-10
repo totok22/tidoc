@@ -871,13 +871,13 @@ code { background: var(--paper-2); padding: 2px 6px; border-radius: 4px; font-si
 .settings-advanced[open] summary { color: var(--ink); }
 .settings-block.about { display: flex; align-items: center; gap: 16px; }
 .settings-block.about img { width: 52px; height: 52px; border-radius: 13px; cursor: pointer; }
-.settings-block.about b { font-size: 16px; display: block; }
-.settings-block.about b small { color: var(--ink-faint); font-size: 12px; font-weight: 600; margin-left: 4px; }
-.settings-block.about span { font-size: 12px; color: var(--ink-soft); display: block; margin: 3px 0 6px; }
+.settings-about-copy > b { font-size: 16px; display: block; }
+.settings-about-copy > b small { color: var(--ink-faint); font-size: 12px; font-weight: 600; margin-left: 4px; }
 .settings-about-copy { min-width: 0; }
+.settings-credit { display: inline-flex; align-items: baseline; gap: 4px; margin: 3px 0 6px; font-size: 12px; color: var(--ink-soft); }
 .settings-about-actions { display: flex; gap: 12px; flex-wrap: wrap; }
 .link-btn { background: none; border: none; padding: 0; color: var(--primary); font-size: 12px; cursor: pointer; font-family: inherit; }
-.link-btn:hover { text-decoration: underline; }
+.link-btn:hover { opacity: .78; }
 .link-btn.with-icon { display: inline-flex; align-items: center; gap: 5px; }
 .link-btn.with-icon svg { flex: 0 0 auto; }
 
@@ -935,7 +935,6 @@ code { background: var(--paper-2); padding: 2px 6px; border-radius: 4px; font-si
 .github-release-btn span { color: inherit; font-size: inherit; }
 .update-inline-actions { display: flex; justify-content: flex-end; }
 .release-highlights { display: flex; flex-direction: column; gap: 14px; }
-.release-kicker { font-size: 10px; font-weight: 800; letter-spacing: .14em; color: var(--primary); }
 .release-heading { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 14px; }
 .release-version {
   min-width: 76px; padding: 10px 12px; border-radius: 11px; background: var(--ink); color: #fff;
@@ -948,11 +947,6 @@ code { background: var(--paper-2); padding: 2px 6px; border-radius: 4px; font-si
 .release-change-list > b { font-size: 12px; }
 .release-change-list ul { margin: 8px 0 0 18px; padding: 0; color: var(--ink-soft); font-size: 12.5px; line-height: 1.6; }
 .release-change-list p { margin: 7px 0 0; color: var(--ink-soft); font-size: 12.5px; }
-.release-quick-start { border-top: 1px solid var(--line-soft); padding-top: 10px; }
-.release-quick-start summary { cursor: pointer; color: var(--ink-soft); font-size: 12px; font-weight: 700; }
-.release-workflow { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-top: 10px; }
-.release-workflow span { display: flex; align-items: center; gap: 6px; color: var(--ink-soft); font-size: 11.5px; }
-.release-workflow i { width: 20px; height: 20px; display: grid; place-items: center; border-radius: 50%; background: var(--primary-soft); color: var(--primary); font-style: normal; font-weight: 800; font-size: 10px; }
 .update-progress {
   height: 5px; overflow: hidden; border-radius: 999px; background: var(--line-soft);
   margin: 8px 0 10px;
@@ -973,13 +967,13 @@ code { background: var(--paper-2); padding: 2px 6px; border-radius: 4px; font-si
   .update-component-action { justify-content: flex-start; }
   .update-fallback { align-items: flex-start; flex-direction: column; }
   .release-heading { align-items: start; }
-  .release-workflow { grid-template-columns: repeat(2, 1fr); }
 }
-.guide-steps { display: grid; gap: 0; border: 1px solid var(--line-soft); border-radius: 10px; overflow: hidden; background: var(--panel-raised); }
-.guide-steps > div { display: grid; grid-template-columns: 120px 1fr; gap: 14px; padding: 14px 16px; border-bottom: 1px solid var(--line-soft); align-items: start; }
+
+.guide-steps { display: grid; border: 1px solid var(--line-soft); border-radius: 10px; overflow: hidden; background: var(--panel-raised); }
+.guide-steps > div { display: grid; grid-template-columns: 100px 1fr; gap: 12px; padding: 12px 14px; border-bottom: 1px solid var(--line-soft); align-items: start; }
 .guide-steps > div:last-child { border-bottom: none; }
-.guide-steps b { font-size: 13.5px; color: var(--ink); }
-.guide-steps span { font-size: 13px; color: var(--ink-soft); line-height: 1.6; }
+.guide-steps b { font-size: 13px; color: var(--ink); }
+.guide-steps span { font-size: 12.5px; color: var(--ink-soft); line-height: 1.5; }
 
 /* 身份管理列表 */
 .profile-list { display: flex; flex-direction: column; gap: 8px; }
