@@ -854,7 +854,7 @@ code { background: var(--paper-2); padding: 2px 6px; border-radius: 4px; font-si
 .settings-row:last-child { border-bottom: none; }
 .settings-block > .settings-row:first-child { padding-top: 14px; }
 .settings-row.is-actionable { cursor: pointer; margin: 0 -16px; padding: 14px 16px; border-radius: 10px; transition: none; }
-.settings-row.is-actionable:hover { background: var(--primary-soft); }
+.settings-row.is-actionable:hover { background: transparent; }
 .settings-row-copy { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
 .settings-row-copy b { font-size: 14px; font-weight: 600; display: flex; align-items: center; gap: 8px; line-height: 1.35; }
 .settings-row-copy span { font-size: 12.5px; color: var(--ink-soft); line-height: 1.5; }
