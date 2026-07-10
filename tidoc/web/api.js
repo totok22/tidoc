@@ -50,6 +50,7 @@ const Api = (() => {
     appPreference: (key, defaultValue) => call('app_preference', key, defaultValue || ''),
     setAppPreference: (key, value) => call('set_app_preference', key, value || ''),
     appInfo: () => call('app_info'),
+    startupUpdateState: () => call('startup_update_state'),
 
     parseFiles: (xml, pdf) => call('parse_files', xml, pdf),
     createEntry: (args) => call('create_entry',
@@ -95,6 +96,7 @@ const Api = (() => {
     printComponentStatus: () => call('print_component_status'),
     buildPrints: (ids, options, name) => call('build_prints', ids, options || null, name || null),
     checkUpdates: () => call('check_updates'),
+    autoCheckUpdates: () => call('auto_check_updates'),
     downloadCoreUpdate: () => call('download_core_update'),
     openDownloadedCoreUpdate: () => call('open_downloaded_core_update'),
     installPrintComponent: () => call('install_print_component'),
@@ -117,6 +119,8 @@ const Api = (() => {
     dataRoot: () => call('data_root_path'),
     chooseAndMigrateDataRoot: () => call('choose_and_migrate_data_root'),
     resetDataRootToDefault: () => call('reset_data_root_to_default'),
+    storageMaintenanceStatus: () => call('storage_maintenance_status'),
+    cleanupAppCache: () => call('cleanup_app_cache'),
     openPath: (path) => call('open_path', path),
     openExternalUrl: (url) => call('open_external_url', url),
   };

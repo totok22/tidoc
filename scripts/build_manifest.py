@@ -48,9 +48,18 @@ def main() -> int:
     parser.add_argument("--out", default=DEFAULT_OUT)
     parser.add_argument("--upload-plan", default=DEFAULT_UPLOAD_PLAN)
     parser.add_argument("--notes", default="", help="single line changelog")
+    parser.add_argument("--notes-file", default="", help="JSON array of user-facing changelog entries")
     parser.add_argument("--min-supported-version", default="0.1.0")
     parser.add_argument("--force-update", action="store_true")
     args = parser.parse_args()
+
+    if args.notes_file:
+        notes = json.loads(Path(args.notes_file).read_text("utf-8"))
+        if not isinstance(notes, list) or not all(isinstance(item, str) for item in notes):
+            raise SystemExit("--notes-file must contain a JSON array of strings")
+        args.release_notes = notes
+    else:
+        args.release_notes = [args.notes] if args.notes else []
 
     release_dir = Path(args.release_dir)
     components: dict[str, dict] = {}
@@ -102,7 +111,6 @@ def main() -> int:
 
 def _component_block(component: str, args) -> dict:
     meta = COMPONENT_META[component]
-    notes = [args.notes] if args.notes else []
     return {
         "name": meta["name"],
         "latest": args.version,
@@ -110,7 +118,7 @@ def _component_block(component: str, args) -> dict:
         "force_update": bool(args.force_update),
         "entrypoint": meta["entrypoint"],
         "release_date": datetime.now(timezone.utc).date().isoformat(),
-        "notes": notes,
+        "notes": args.release_notes,
         "platforms": {},
     }
 

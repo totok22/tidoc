@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import functools
 import base64
+import json
 import os
 import re
 import subprocess
@@ -28,6 +29,12 @@ from .db import (
     EntryRepo,
     ProfileRepo,
 )
+
+AUTO_UPDATE_PREF_KEY = "tidoc.update.autoCheck"
+UPDATE_LAST_CHECK_KEY = "tidoc.update.lastCheck"
+UPDATE_LAST_RESULT_KEY = "tidoc.update.lastResult"
+APP_LAST_SEEN_VERSION_KEY = "tidoc.update.lastSeenVersion"
+AUTO_UPDATE_INTERVAL_SECONDS = 24 * 60 * 60
 
 def _guard(func):
     """把返回值包成 {ok:True,...}，异常包成 {ok:False,error:...}。"""
@@ -114,11 +121,13 @@ class Api:
 
     @_guard
     def app_info(self):
+        repository = "https://github.com/totok22/tidoc"
         return {
             "name": "tidoc",
             "version": __version__,
             "author": "totok22",
-            "repository": "https://github.com/totok22/tidoc",
+            "repository": repository,
+            "releases": f"{repository}/releases/latest",
         }
 
     # ------------------------------------------------------------ 录入 / 识别
@@ -629,7 +638,62 @@ class Api:
     @_guard
     def check_updates(self):
         from .services.updater import check_updates
-        return check_updates(self.data_root.components_dir, updates_dir=self.data_root.updates_dir)
+        status = check_updates(self.data_root.components_dir, updates_dir=self.data_root.updates_dir)
+        return self._record_update_check(status)
+
+    @_guard
+    def auto_check_updates(self):
+        """按用户偏好执行低频启动检查；只检查，不下载或安装。"""
+        if self._preference_value(AUTO_UPDATE_PREF_KEY, "0") != "1":
+            return {"checked": False, "reason": "disabled", "updates": []}
+
+        now = int(time.time())
+        try:
+            last_check = int(self._preference_value(UPDATE_LAST_CHECK_KEY, "0") or 0)
+        except ValueError:
+            last_check = 0
+        if last_check and now - last_check < AUTO_UPDATE_INTERVAL_SECONDS:
+            cached = self._cached_update_result()
+            return {
+                **cached,
+                "checked": False,
+                "reason": "recent",
+                "checked_at": last_check,
+                "next_check_at": last_check + AUTO_UPDATE_INTERVAL_SECONDS,
+            }
+
+        from .services.updater import check_updates
+        status = check_updates(self.data_root.components_dir, updates_dir=self.data_root.updates_dir)
+        status = self._record_update_check(status, now)
+        status.update({"checked": True, "reason": "due"})
+        return status
+
+    @_guard
+    def startup_update_state(self):
+        """记录已启动版本，并在真正升级后的首次启动返回本次变化。"""
+        from .services.updater import version_gt
+
+        previous = self._preference_value(APP_LAST_SEEN_VERSION_KEY, "")
+        upgraded = bool(previous and version_gt(__version__, previous))
+        if not previous or version_gt(__version__, previous):
+            self._set_preference_value(APP_LAST_SEEN_VERSION_KEY, __version__)
+
+        notes: list[str] = []
+        cached = self._cached_update_result()
+        if upgraded:
+            for item in cached.get("updates") or []:
+                if item.get("component") != "core" or item.get("latest_version") != __version__:
+                    continue
+                raw_notes = (item.get("asset") or {}).get("notes") or []
+                notes = raw_notes if isinstance(raw_notes, list) else [str(raw_notes)]
+                break
+        return {
+            "upgraded": upgraded,
+            "first_launch": not previous,
+            "previous_version": previous,
+            "current_version": __version__,
+            "notes": notes,
+        }
 
     @_guard
     def download_core_update(self):
@@ -655,6 +719,36 @@ class Api:
             manifest, self.data_root.components_dir, self.data_root.updates_dir
         )
         return result.to_dict()
+
+    # ------------------------------------------------------------ 临时文件维护
+    @_guard
+    def storage_maintenance_status(self):
+        files = self._cache_cleanup_candidates()
+        return {
+            "files": len(files),
+            "size": sum(path.stat().st_size for path in files if path.exists()),
+        }
+
+    @_guard
+    def cleanup_app_cache(self):
+        files = self._cache_cleanup_candidates()
+        removed = 0
+        released = 0
+        for path in files:
+            try:
+                size = path.stat().st_size
+                path.unlink()
+                removed += 1
+                released += size
+            except FileNotFoundError:
+                continue
+        for root in (self.data_root.dropped_dir, self.data_root.updates_dir):
+            for folder in sorted((p for p in root.rglob("*") if p.is_dir()), reverse=True):
+                try:
+                    folder.rmdir()
+                except OSError:
+                    pass
+        return {"files": removed, "size": released}
 
     # ------------------------------------------------------------ 文件对话框
     @_guard
@@ -753,6 +847,57 @@ class Api:
             row = self.db.conn.execute("SELECT value FROM meta WHERE key = ?", (pref_key,)).fetchone()
             profile[out_key] = row["value"] if row else ""
         return profile
+
+    def _preference_value(self, key: str, default: str = "") -> str:
+        row = self.db.conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+        return row["value"] if row else default
+
+    def _set_preference_value(self, key: str, value: str) -> None:
+        self.db.conn.execute(
+            "INSERT INTO meta(key, value) VALUES(?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, value),
+        )
+        self.db.conn.commit()
+
+    def _record_update_check(self, status: dict, checked_at: int | None = None) -> dict:
+        checked_at = checked_at or int(time.time())
+        result = {**status, "checked_at": checked_at}
+        self._set_preference_value(UPDATE_LAST_CHECK_KEY, str(checked_at))
+        self._set_preference_value(
+            UPDATE_LAST_RESULT_KEY,
+            json.dumps(result, ensure_ascii=False, separators=(",", ":")),
+        )
+        return result
+
+    def _cached_update_result(self) -> dict:
+        raw = self._preference_value(UPDATE_LAST_RESULT_KEY, "")
+        if not raw:
+            return {"updates": []}
+        try:
+            result = json.loads(raw)
+        except (TypeError, json.JSONDecodeError):
+            return {"updates": []}
+        return result if isinstance(result, dict) else {"updates": []}
+
+    def _cache_cleanup_candidates(self) -> list[Path]:
+        """只返回可重建的临时文件，保留待安装核心包和所有业务数据。"""
+        from .services.updater import downloaded_core_update_info
+
+        pending = downloaded_core_update_info(self.data_root.updates_dir)
+        pending_path = Path(pending.get("file_path") or "") if pending else None
+        pending_resolved = pending_path.resolve() if pending_path and pending_path.exists() else None
+        files: list[Path] = []
+        for path in self.data_root.dropped_dir.rglob("*"):
+            if path.is_file():
+                files.append(path)
+        for path in self.data_root.updates_dir.rglob("*"):
+            if not path.is_file() or path.name == "current.json":
+                continue
+            if pending_resolved and path.resolve() == pending_resolved:
+                continue
+            files.append(path)
+        return files
 
     @_guard
     def open_path(self, path):

@@ -616,6 +616,12 @@ input[type="date"] { color: var(--ink-soft); }
 .btn.danger:hover { background: var(--blocked-soft); border-color: var(--blocked); }
 .btn[disabled] { opacity: .55; cursor: not-allowed; }
 .btn.icon-only { width: 34px; height: 34px; padding: 0; justify-content: center; }
+.btn.icon-only { position: relative; }
+.update-notice-dot {
+  display: none; position: absolute; top: 5px; right: 5px; width: 7px; height: 7px;
+  border-radius: 50%; background: var(--modified); border: 1.5px solid var(--panel);
+}
+.btn.icon-only.has-update .update-notice-dot { display: block; }
 
 /* ---------------------------------------------------------------- modal */
 .modal-mask { position: fixed; inset: 0; background: rgba(20, 18, 10, .5); backdrop-filter: blur(3px); display: grid; place-items: center; z-index: 50; animation: fade .15s ease; }
@@ -648,6 +654,7 @@ input[type="date"] { color: var(--ink-soft); }
   padding: 10px 12px; border-radius: 9px; line-height: 1.6; border: 1px solid var(--line-soft);
 }
 .hint.warn { background: var(--warn-soft); color: var(--warn); border-color: #f0dcb0; }
+.hint.ok { background: var(--pass-soft); color: var(--pass); border-color: transparent; }
 .hint.ok-hint { background: var(--pass-soft); color: var(--pass); border-color: transparent; }
 .upload-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 14px; }
 .upload-tile {
@@ -871,6 +878,81 @@ code { background: var(--paper-2); padding: 2px 6px; border-radius: 4px; font-si
 .settings-about-actions { display: flex; gap: 12px; flex-wrap: wrap; }
 .link-btn { background: none; border: none; padding: 0; color: var(--primary); font-size: 12px; cursor: pointer; font-family: inherit; }
 .link-btn:hover { text-decoration: underline; }
+.link-btn.with-icon { display: inline-flex; align-items: center; gap: 5px; }
+.link-btn.with-icon svg { flex: 0 0 auto; }
+
+/* 软件更新 —— 安静的版本台账，状态和动作优先 */
+.update-shell { display: flex; flex-direction: column; gap: 14px; }
+.update-loading { min-height: 160px; display: grid; place-items: center; align-content: center; gap: 8px; color: var(--ink-soft); }
+.update-loading .update-progress { width: min(280px, 70%); }
+.update-summary {
+  min-height: 82px; display: grid; grid-template-columns: 42px minmax(0, 1fr) auto;
+  align-items: center; gap: 14px; padding: 15px 16px; border: 1px solid var(--line-soft);
+  border-radius: 12px; background: var(--panel-raised);
+}
+.update-summary.has-update { background: linear-gradient(100deg, var(--primary-soft), var(--panel-raised) 72%); border-color: #cbdafa; }
+.update-summary.is-current { background: linear-gradient(100deg, var(--pass-soft), var(--panel-raised) 72%); }
+.update-summary.is-error { background: linear-gradient(100deg, var(--warn-soft), var(--panel-raised) 72%); }
+.update-summary-icon {
+  width: 42px; height: 42px; border-radius: 11px; display: grid; place-items: center;
+  background: var(--primary); color: #fff; font-size: 21px; font-weight: 700;
+}
+.update-summary.is-current .update-summary-icon { background: var(--pass); }
+.update-summary.is-error .update-summary-icon { background: var(--warn); }
+.update-summary > div { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.update-summary b { font-size: 15px; line-height: 1.35; }
+.update-summary > div > span { color: var(--ink-soft); font-size: 12.5px; }
+.update-section-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 2px 2px 0; }
+.update-section-head b { font-size: 12px; letter-spacing: .04em; }
+.update-section-head span { font-size: 11.5px; color: var(--ink-faint); }
+.update-components { display: flex; flex-direction: column; border: 1px solid var(--line-soft); border-radius: 11px; overflow: hidden; background: var(--panel-raised); }
+.update-component { padding: 14px 15px; border-bottom: 1px solid var(--line-soft); }
+.update-component:last-child { border-bottom: none; }
+.update-component-main { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 16px; align-items: center; }
+.update-component-copy { min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.update-component-title { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.update-component-title b { font-size: 13.5px; }
+.update-component-copy > span { font-size: 12px; color: var(--ink-soft); font-variant-numeric: tabular-nums; }
+.update-component-action { display: flex; justify-content: flex-end; }
+.update-badge { font-size: 10.5px; font-weight: 700; line-height: 1; padding: 4px 7px; border-radius: 999px; }
+.update-badge.available { color: var(--primary); background: var(--primary-soft); }
+.update-badge.current { color: var(--pass); background: var(--pass-soft); }
+.update-badge.pending { color: var(--warn); background: var(--warn-soft); }
+.update-notes { margin: 10px 0 0 18px; padding: 0; color: var(--ink-soft); font-size: 12px; line-height: 1.55; }
+.update-fallback {
+  display: flex; align-items: center; justify-content: space-between; gap: 16px;
+  border-top: 1px solid var(--line-soft); padding: 13px 2px 0;
+}
+.update-fallback > div { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.update-fallback b { font-size: 12.5px; }
+.update-fallback span { font-size: 11.5px; color: var(--ink-soft); }
+.github-release-btn {
+  flex: 0 0 auto; display: inline-flex; align-items: center; gap: 7px; border: 1px solid #30343b;
+  border-radius: 8px; background: #24292f; color: #fff; padding: 7px 11px; cursor: pointer; font: 600 12px var(--font-sans);
+}
+.github-release-btn:hover { background: #11151a; }
+.github-release-btn svg { flex: 0 0 auto; }
+.github-release-btn span { color: inherit; font-size: inherit; }
+.update-inline-actions { display: flex; justify-content: flex-end; }
+.release-highlights { display: flex; flex-direction: column; gap: 14px; }
+.release-kicker { font-size: 10px; font-weight: 800; letter-spacing: .14em; color: var(--primary); }
+.release-heading { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 14px; }
+.release-version {
+  min-width: 76px; padding: 10px 12px; border-radius: 11px; background: var(--ink); color: #fff;
+  font: 700 17px var(--font-mono); text-align: center; letter-spacing: -.04em;
+}
+.release-heading > div { display: flex; flex-direction: column; gap: 3px; }
+.release-heading b { font-size: 16px; }
+.release-heading > div span { font-size: 12.5px; color: var(--ink-soft); }
+.release-change-list { border: 1px solid var(--line-soft); background: var(--panel-raised); border-radius: 10px; padding: 13px 15px; }
+.release-change-list > b { font-size: 12px; }
+.release-change-list ul { margin: 8px 0 0 18px; padding: 0; color: var(--ink-soft); font-size: 12.5px; line-height: 1.6; }
+.release-change-list p { margin: 7px 0 0; color: var(--ink-soft); font-size: 12.5px; }
+.release-quick-start { border-top: 1px solid var(--line-soft); padding-top: 10px; }
+.release-quick-start summary { cursor: pointer; color: var(--ink-soft); font-size: 12px; font-weight: 700; }
+.release-workflow { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-top: 10px; }
+.release-workflow span { display: flex; align-items: center; gap: 6px; color: var(--ink-soft); font-size: 11.5px; }
+.release-workflow i { width: 20px; height: 20px; display: grid; place-items: center; border-radius: 50%; background: var(--primary-soft); color: var(--primary); font-style: normal; font-weight: 800; font-size: 10px; }
 .update-progress {
   height: 5px; overflow: hidden; border-radius: 999px; background: var(--line-soft);
   margin: 8px 0 10px;
@@ -882,6 +964,16 @@ code { background: var(--paper-2); padding: 2px 6px; border-radius: 4px; font-si
 @keyframes updateSlide {
   0% { transform: translateX(-110%); }
   100% { transform: translateX(260%); }
+}
+@media (max-width: 680px) {
+  .update-summary { grid-template-columns: 38px minmax(0, 1fr); }
+  .update-summary-icon { width: 38px; height: 38px; }
+  .update-summary > button { grid-column: 2; justify-self: start; }
+  .update-component-main { grid-template-columns: 1fr; gap: 10px; }
+  .update-component-action { justify-content: flex-start; }
+  .update-fallback { align-items: flex-start; flex-direction: column; }
+  .release-heading { align-items: start; }
+  .release-workflow { grid-template-columns: repeat(2, 1fr); }
 }
 .guide-steps { display: grid; gap: 0; border: 1px solid var(--line-soft); border-radius: 10px; overflow: hidden; background: var(--panel-raised); }
 .guide-steps > div { display: grid; grid-template-columns: 120px 1fr; gap: 14px; padding: 14px 16px; border-bottom: 1px solid var(--line-soft); align-items: start; }

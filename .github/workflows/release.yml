@@ -15,7 +15,23 @@ permissions:
   contents: write
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+      - name: Run tests
+        run: pytest -q
+
   build-windows:
+    needs: test
     runs-on: windows-latest
     env:
       VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
@@ -41,13 +57,20 @@ jobs:
 
       - name: Build Windows core
         run: >
-          pyinstaller --noconfirm --clean --onefile --windowed
+          pyinstaller --noconfirm --clean --onedir --windowed
           --name tidoc
           --paths "."
           --collect-submodules tidoc
           --icon "tidoc/web/assets/tidoc-logo.icns"
           --add-data "tidoc/web;tidoc/web"
           scripts/tidoc_app_entry.py
+
+      - name: Build Windows installer
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path release | Out-Null
+          $iscc = Join-Path ${env:ProgramFiles(x86)} "Inno Setup 6\ISCC.exe"
+          & $iscc "/DMyAppVersion=$env:VERSION" "/DSourceDir=$PWD\dist\tidoc" "/DOutputDir=$PWD\release" "packaging\windows\tidoc.iss"
 
       - name: Install print dependencies
         run: pip install -r requirements-print.txt
@@ -65,7 +88,6 @@ jobs:
         shell: bash
         run: |
           mkdir -p release
-          cp dist/tidoc.exe "release/tidoc-core-windows-v${VERSION}.exe"
           cp dist/tidoc_print.exe "release/tidoc-print-windows-v${VERSION}.exe"
 
       - uses: actions/upload-artifact@v4
@@ -74,6 +96,7 @@ jobs:
           path: release/*
 
   build-macos:
+    needs: test
     runs-on: macos-latest
     env:
       VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
@@ -166,13 +189,20 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Generate release notes
+        run: >
+          python scripts/release_notes.py
+          --version "$VERSION"
+          --output release/release_notes.md
+          --json-output release/release_notes.json
+
       - name: Build manifest
         run: >
           python scripts/build_manifest.py
           --release-dir release
           --version "$VERSION"
           --base-url "https://img.bitfsae.com/tidoc"
-          --notes "Tidoc $VERSION"
+          --notes-file release/release_notes.json
 
       - name: Install Tencent COSCLI
         run: |
@@ -224,20 +254,6 @@ jobs:
           set -euo pipefail
           tag="v${VERSION}"
           notes="release/release_notes.md"
-          cat > "$notes" <<EOF
-          Tidoc ${VERSION}
-
-          安装包：
-          - macOS：tidoc-core-macos-v${VERSION}.dmg
-          - Windows：tidoc-core-windows-v${VERSION}.exe
-
-          可选打印组件：
-          - macOS：tidoc-print-macos-v${VERSION}.zip
-          - Windows：tidoc-print-windows-v${VERSION}.exe
-
-          更新清单已同步到 COS：
-          https://img.bitfsae.com/tidoc/manifest.json
-          EOF
           assets=(
             "release/tidoc-core-macos-v${VERSION}.dmg"
             "release/tidoc-core-windows-v${VERSION}.exe"
