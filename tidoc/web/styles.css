@@ -798,7 +798,7 @@ code { background: var(--paper-2); padding: 2px 6px; border-radius: 4px; font-si
 }
 .batch-import-summary span { font-size: 11px; color: var(--ink-soft); }
 .batch-import-summary b { font-family: var(--font-display); font-size: 18px; font-weight: 500; }
-.settings-shell { display: grid; gap: 12px; }
+.settings-shell { display: grid; gap: 18px; }
 .settings-hero {
   display: grid; grid-template-columns: 54px 1fr; gap: 14px; align-items: center;
   padding: 14px; border: 1px solid var(--line-soft); border-radius: 12px;
@@ -848,7 +848,7 @@ code { background: var(--paper-2); padding: 2px 6px; border-radius: 4px; font-si
 .settings-warn { color: var(--warn) !important; font-weight: 600; }
 
 /* 设置页 —— 分块配置中心 */
-.settings-block { border: 1px solid var(--line-soft); border-radius: 12px; background: var(--panel-raised); padding: 4px 16px; }
+.settings-block { border: 1px solid var(--line-soft); border-radius: 12px; background: var(--panel-raised); padding: 6px 16px; }
 .settings-block-title { font-size: 10.5px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-faint); padding: 12px 0 6px; }
 .settings-row { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 12px 0; border-bottom: 1px solid var(--line-soft); }
 .settings-row:last-child { border-bottom: none; }
@@ -869,7 +869,7 @@ code { background: var(--paper-2); padding: 2px 6px; border-radius: 4px; font-si
 .settings-advanced { border-top: 1px solid var(--line-soft); margin-top: 8px; padding: 10px 0 8px; }
 .settings-advanced summary { cursor: pointer; color: var(--ink-soft); font-size: 12px; font-weight: 600; }
 .settings-advanced[open] summary { color: var(--ink); }
-.settings-block.about { display: flex; align-items: center; gap: 14px; padding-top: 12px; padding-bottom: 12px; }
+.settings-block.about { display: flex; align-items: center; gap: 16px; }
 .settings-block.about img { width: 52px; height: 52px; border-radius: 13px; cursor: pointer; }
 .settings-about-copy > b { font-size: 16px; display: block; }
 .settings-about-copy > b small { color: var(--ink-faint); font-size: 12px; font-weight: 600; margin-left: 4px; }
