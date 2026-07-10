@@ -1487,11 +1487,12 @@ async function openSettings() {
       <!-- 可选组件与更新 -->
       <div class="settings-block">
         <div class="settings-block-title">组件与更新</div>
-        <div class="settings-row">
+        <div class="settings-row is-actionable" id="setPrintComponent">
           <div class="settings-row-copy">
             <b>打印导出组件 ${printBadge}</b>
             <span>${printDetail}</span>
           </div>
+          <button class="btn small ghost">管理</button>
         </div>
         <div class="settings-row is-actionable" id="setUpdate">
           <div class="settings-row-copy">
@@ -1590,6 +1591,7 @@ async function openSettings() {
   };
 
   body.querySelector('#setProfilesManage').onclick = () => { m.close(); openProfileManager(false); };
+  body.querySelector('#setPrintComponent').onclick = () => { m.close(); openUpdateDialog(); };
   body.querySelector('#setUpdate').onclick = () => { m.close(); openUpdateDialog(); };
   body.querySelector('#setGuide').onclick = () => { m.close(); openUsageGuide(false); };
   body.querySelector('#setBitfsae').onclick = () => Api.openExternalUrl('https://www.bitfsae.com').catch((e) => toast(e.message, 'err'));
