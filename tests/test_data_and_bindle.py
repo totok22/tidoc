@@ -247,6 +247,20 @@ def test_dropped_file_cleanup(api):
     assert not os.path.exists(path)
 
 
+def test_dropped_file_rejects_invalid_base64(api):
+    res = api.save_dropped_files([{"name": "bad.pdf", "data_url": "data:application/pdf;base64,not-base64"}])
+    assert res["ok"] is False
+    assert "文件内容无效" in res["error"]
+
+
+def test_dropped_file_rejects_oversized_payload(api, monkeypatch):
+    monkeypatch.setattr("tidoc.api.MAX_DROPPED_FILE_BYTES", 3)
+    payload = base64.b64encode(b"four").decode()
+    res = api.save_dropped_files([{"name": "large.pdf", "data_url": payload}])
+    assert res["ok"] is False
+    assert "文件过大" in res["error"]
+
+
 def test_api_rejects_unrecognized_invoice_xml(api, sample_xmls, tmp_path):
     p = api.create_profile("张三", "李老师")["data"]
     e = api.create_entry(p["id"], xml_path=sample_xmls[0])["data"]

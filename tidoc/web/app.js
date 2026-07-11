@@ -9,6 +9,7 @@ const State = {
   entries: [],
   selected: new Set(),
   lastSelectedId: null,
+  focusedEntryId: null,
   suppressListAnimation: false,
   density: 'comfortable',
   groupBy: 'none',       // 'none' | 'profile' | 'title' —— 列表分组浏览
@@ -361,19 +362,13 @@ async function refreshEntries() {
 // ------------------------------------------------------------------ 渲染列表
 function renderEntries() {
   const list = $('#entryList');
+  const activeCard = document.activeElement?.closest?.('.entry-card');
+  const restoreFocusId = activeCard?.dataset.entryId || null;
   list.dataset.density = State.density;
   list.classList.toggle('no-anim', State.suppressListAnimation);
   list.innerHTML = '';
   const empty = $('#emptyState');
   const emptyAll = State.entries.length === 0;
-
-  let sum = 0, paidSum = 0, modifiedCount = 0;
-  State.entries.forEach((e) => {
-    sum += Number(e.total) || 0;
-    const fp = e.fields && e.fields.paid_amount ? Number(e.fields.paid_amount.current) : 0;
-    paidSum += isNaN(fp) ? 0 : fp;
-    if (e.modified_fields && e.modified_fields.length) modifiedCount++;
-  });
 
   if (State.groupBy !== 'none' && !emptyAll) {
     renderGroupedEntries(list);
@@ -381,13 +376,7 @@ function renderEntries() {
     State.entries.forEach((e) => list.appendChild(entryCard(e)));
   }
 
-  $('#stats').innerHTML = emptyAll
-    ? ''
-    : `<span><b>${State.entries.length}</b> 条</span>
-       <span class="sep">·</span>
-       <span>合计 <b class="stats-sum">${fmtMoney(sum)}</b></span>
-       ${paidSum ? `<span class="sep">·</span><span>实付 <b style="color:var(--pass)">${fmtMoney(paidSum)}</b></span>` : ''}
-       ${modifiedCount ? `<span class="sep">·</span><span>已改 <b>${modifiedCount}</b></span>` : ''}`;
+  updateListSummary();
 
   empty.hidden = !emptyAll;
   if (emptyAll) renderEmptyState();
@@ -398,13 +387,107 @@ function renderEntries() {
     const btn = $('#' + id);
     if (btn) btn.disabled = !hasSelection;
   });
+  if (!State.entries.some((entry) => entry.id === State.focusedEntryId)) {
+    State.focusedEntryId = State.entries[0]?.id || null;
+  }
+  $$('.entry-card', list).forEach((card) => {
+    card.tabIndex = card.dataset.entryId === State.focusedEntryId ? 0 : -1;
+  });
+  if (restoreFocusId) focusEntryCard(restoreFocusId, false);
   State.suppressListAnimation = false;
+}
+
+function updateListSummary() {
+  let sum = 0, paidSum = 0, modifiedCount = 0;
+  State.entries.forEach((entry) => {
+    sum += Number(entry.total) || 0;
+    const paid = Number(entry.fields?.paid_amount?.current);
+    paidSum += isNaN(paid) ? 0 : paid;
+    if (entry.modified_fields?.length) modifiedCount++;
+  });
+  $('#stats').innerHTML = State.entries.length
+    ? `<span><b>${State.entries.length}</b> 条</span>
+       <span class="sep">·</span>
+       <span>合计 <b class="stats-sum">${fmtMoney(sum)}</b></span>
+       ${paidSum ? `<span class="sep">·</span><span>实付 <b style="color:var(--pass)">${fmtMoney(paidSum)}</b></span>` : ''}
+       ${modifiedCount ? `<span class="sep">·</span><span>已改 <b>${modifiedCount}</b></span>` : ''}`
+    : '';
+}
+
+function listEntryFromDetail(entry) {
+  const fields = entry.fields || {};
+  const attachmentTypes = {};
+  (entry.attachments || []).forEach((attachment) => {
+    attachmentTypes[attachment.type] = (attachmentTypes[attachment.type] || 0) + 1;
+  });
+  return {
+    ...entry,
+    fields,
+    modified_fields: Object.entries(fields)
+      .filter(([field, value]) => field !== 'notes' && value?.modified)
+      .map(([field]) => field),
+    attachment_count: Object.values(attachmentTypes).reduce((sum, count) => sum + count, 0),
+    attachment_types: attachmentTypes,
+    has_invoice: !!(attachmentTypes.invoice_pdf || attachmentTypes.invoice_xml),
+    has_payment: !!attachmentTypes.payment_screenshot,
+    has_inspection: !!attachmentTypes.inspection_pdf,
+  };
+}
+
+async function refreshEntryCard(entryId, currentDetail = null) {
+  const detail = currentDetail || await Api.getEntry(entryId);
+  if (!detail) return;
+  const entry = listEntryFromDetail(detail);
+  const index = State.entries.findIndex((item) => item.id === entryId);
+  if (index < 0) return;
+  State.entries[index] = entry;
+
+  if (State.quickView === 'incomplete' && (entry.completeness?.status || entry.status) === 'complete') {
+    State.entries.splice(index, 1);
+    renderEntries();
+    return;
+  }
+  if (State.groupBy !== 'none') {
+    renderEntries();
+    return;
+  }
+
+  const current = entryCards().find((card) => card.dataset.entryId === entryId);
+  if (!current) return;
+  const hadFocus = current.contains(document.activeElement);
+  const replacement = entryCard(entry);
+  replacement.tabIndex = entryId === State.focusedEntryId ? 0 : -1;
+  current.replaceWith(replacement);
+  updateListSummary();
+  if (hadFocus) focusEntryCard(entryId, false);
+}
+
+async function syncEntryAfterChange(entryId, { searchable = false, notes = false, affectsStatus = false, relist = false } = {}, detail = null) {
+  const keywordActive = !!$('#filterKeyword')?.value;
+  const statusActive = !!$('#filterStatus')?.value;
+  if (relist || (searchable && keywordActive) || (notes && State.notesFilter) || (affectsStatus && statusActive)) {
+    await refreshEntries();
+    return;
+  }
+  await refreshEntryCard(entryId, detail);
+}
+
+async function reopenEntryDetail(modalRef, entryId, options = {}) {
+  modalRef.close();
+  const detail = await Api.getEntry(entryId);
+  await syncEntryAfterChange(entryId, options, detail);
+  await openEntryDetail(entryId, detail);
 }
 
 function entryCard(e) {
   const tcls = TITLE_CLASS[e.title] || '';
   const card = el('div', 'entry-card' + (tcls ? ' title-' + tcls : '') +
     (State.selected.has(e.id) ? ' selected' : ''));
+  card.dataset.entryId = e.id;
+  card.setAttribute('role', 'option');
+  card.setAttribute('aria-selected', State.selected.has(e.id) ? 'true' : 'false');
+  card.setAttribute('aria-label', `${itemCardLabel(e)}，${fmtMoney(e.total)}`);
+  card.setAttribute('aria-keyshortcuts', 'Enter Space ArrowUp ArrowDown Home End');
 
   const check = el('div', 'entry-check');
   check.title = '切换选中';
@@ -419,6 +502,7 @@ function entryCard(e) {
   const stripe = el('div', 'entry-stripe');
   stripe.title = '切换选中';
   stripe.onclick = (ev) => { ev.stopPropagation(); toggleSelect(e.id, ev.shiftKey); };
+  stripe.ondblclick = (ev) => { ev.preventDefault(); ev.stopPropagation(); };
 
   const modified = (e.modified_fields && e.modified_fields.length)
     ? `<span class="badge modified" title="有 ${e.modified_fields.length} 个字段被人工修改">${iconPencil(11)}已改 ${e.modified_fields.length}</span>` : '';
@@ -483,7 +567,7 @@ function entryCard(e) {
       ${actionBtn('pay', '付款', e.has_payment, e.has_payment ? '已添加付款截图；点击继续添加' : '添加付款截图')}
       ${actionBtn('inspect', '查验', e.has_inspection, e.has_inspection ? '已添加查验单；点击继续添加' : '添加查验单')}
     </div>
-    <div class="entry-open-hint">点击打开</div>`;
+    <div class="entry-open-hint">双击打开</div>`;
   right.querySelectorAll('[data-card-action]').forEach((b) => {
     b.onclick = async (ev) => {
       ev.stopPropagation();
@@ -493,18 +577,38 @@ function entryCard(e) {
       else if (action === 'pay') await quickAddAttachment(e.id, 'payment_screenshot');
       else if (action === 'inspect') await quickAddAttachment(e.id, 'inspection_pdf');
     };
+    b.ondblclick = (ev) => { ev.preventDefault(); ev.stopPropagation(); };
   });
 
   card.append(check, stripe, main, right);
-  let openTimer = null;
-  card.onclick = () => {
-    openTimer = setTimeout(() => openEntryDetail(e.id), 260);
+  let selectTimer = null;
+  card.onclick = (ev) => {
+    if (selectTimer) clearTimeout(selectTimer);
+    State.focusedEntryId = e.id;
+    card.focus({ preventScroll: true });
+    const willSelect = !State.selected.has(e.id);
+    card.classList.toggle('selected', willSelect);
+    card.setAttribute('aria-selected', willSelect ? 'true' : 'false');
+    cb.checked = willSelect;
+    selectTimer = setTimeout(() => {
+      selectTimer = null;
+      toggleSelect(e.id, ev.shiftKey);
+    }, 260);
   };
-  card.ondblclick = async (ev) => {
+  card.ondblclick = (ev) => {
     ev.preventDefault();
-    if (openTimer) clearTimeout(openTimer);
-    await quickPaidFlow(e);
+    if (selectTimer) clearTimeout(selectTimer);
+    selectTimer = null;
+    card.classList.toggle('selected', State.selected.has(e.id));
+    card.setAttribute('aria-selected', State.selected.has(e.id) ? 'true' : 'false');
+    cb.checked = State.selected.has(e.id);
+    openEntryDetail(e.id);
   };
+  card.onfocus = () => {
+    State.focusedEntryId = e.id;
+    $$('.entry-card', $('#entryList')).forEach((node) => { node.tabIndex = node === card ? 0 : -1; });
+  };
+  card.onkeydown = (ev) => handleEntryCardKeydown(ev, e);
   card.oncontextmenu = (ev) => {
     ev.preventDefault();
     openEntryMenu(ev.clientX, ev.clientY, e);
@@ -527,6 +631,81 @@ function entryCard(e) {
     } catch (err) { toast(err.message, 'err'); }
   };
   return card;
+}
+
+function itemCardLabel(entry) {
+  const fields = entry.fields || {};
+  const actual = fields.actual_item_name?.current;
+  const item = actual || entry.items?.[0]?.actual_name || entry.items?.[0]?.name || '未填物资名称';
+  return `${item}，${entry.seller || '未识别销售方'}，发票号 ${entry.invoice_no || '无'}`;
+}
+
+function entryCards() {
+  return $$('.entry-card', $('#entryList'));
+}
+
+function focusEntryCard(entryId, scroll = true) {
+  const card = entryCards().find((node) => node.dataset.entryId === entryId);
+  if (!card) return;
+  State.focusedEntryId = entryId;
+  entryCards().forEach((node) => { node.tabIndex = node === card ? 0 : -1; });
+  card.focus({ preventScroll: !scroll });
+  if (scroll) card.scrollIntoView({ block: 'nearest' });
+}
+
+function moveEntryFocus(currentId, targetIndex, extendSelection) {
+  const cards = entryCards();
+  if (!cards.length) return;
+  const bounded = Math.max(0, Math.min(cards.length - 1, targetIndex));
+  const targetId = cards[bounded].dataset.entryId;
+  if (extendSelection) {
+    if (!State.lastSelectedId) State.lastSelectedId = currentId;
+    toggleSelect(targetId, true);
+  }
+  focusEntryCard(targetId);
+}
+
+function handleEntryCardKeydown(ev, entry) {
+  if (ev.target !== ev.currentTarget) return;
+  const cards = entryCards();
+  const index = cards.indexOf(ev.currentTarget);
+  const key = ev.key;
+  let targetIndex = null;
+  if (key === 'ArrowDown' || key === 'ArrowRight') targetIndex = index + 1;
+  else if (key === 'ArrowUp' || key === 'ArrowLeft') targetIndex = index - 1;
+  else if (key === 'Home') targetIndex = 0;
+  else if (key === 'End') targetIndex = cards.length - 1;
+  else if (key === 'PageDown') targetIndex = index + 5;
+  else if (key === 'PageUp') targetIndex = index - 5;
+
+  if (targetIndex != null) {
+    ev.preventDefault();
+    moveEntryFocus(entry.id, targetIndex, ev.shiftKey);
+    return;
+  }
+  if (key === ' ' || key === 'Spacebar') {
+    ev.preventDefault();
+    toggleSelect(entry.id, ev.shiftKey);
+    focusEntryCard(entry.id, false);
+  } else if (key === 'Enter') {
+    ev.preventDefault();
+    openEntryDetail(entry.id);
+  } else if ((ev.metaKey || ev.ctrlKey) && key.toLowerCase() === 'a') {
+    ev.preventDefault();
+    ev.stopPropagation();
+    selectAllVisible().then(() => focusEntryCard(entry.id, false));
+  } else if (key === 'Escape' && State.selected.size) {
+    ev.preventDefault();
+    ev.stopPropagation();
+    State.selected.clear();
+    State.lastSelectedId = null;
+    renderEntries();
+    focusEntryCard(entry.id, false);
+  } else if (key === 'ContextMenu' || (ev.shiftKey && key === 'F10')) {
+    ev.preventDefault();
+    const rect = ev.currentTarget.getBoundingClientRect();
+    openEntryMenu(rect.left + 24, rect.top + 24, entry);
+  }
 }
 
 function sameMoney(a, b) {
@@ -934,7 +1113,7 @@ async function quickPaidFlow(e) {
       mkBtn('保存', 'primary', async () => {
         try {
           await Api.updateField(e.id, 'paid_amount', body.querySelector('#qpInput').value, State.currentProfileId);
-          m.close(); await refreshEntries(); toast('实付金额已保存', 'ok');
+          m.close(); await syncEntryAfterChange(e.id, { affectsStatus: true }); toast('实付金额已保存', 'ok');
         } catch (err) { toast(err.message, 'err'); }
       }),
     ],
@@ -950,11 +1129,11 @@ async function quickAddAttachment(entryId, type) {
     if (type === 'payment_screenshot') {
       const infos = (await materialInfosForPaths(paths)).map((info) => ({ ...info, type }));
       const result = await addMaterialInfosToEntry(entryId, infos);
-      await refreshEntries();
+      await syncEntryAfterChange(entryId, { affectsStatus: true });
       toast(result.message || '材料已添加', 'ok');
     } else {
       for (const p of paths) await Api.addAttachment(entryId, p, type);
-      await refreshEntries();
+      await syncEntryAfterChange(entryId, { affectsStatus: true });
       toast('材料已添加', 'ok');
     }
   } catch (err) { toast(err.message, 'err'); }
@@ -1120,7 +1299,7 @@ async function quickNoteFlow(e) {
     footer: [
       mkBtn('取消', 'ghost', () => m.close()),
       mkBtn('保存', 'primary', async () => {
-        try { await Api.updateField(e.id, 'notes', body.querySelector('#qnInput').value, State.currentProfileId); m.close(); await refreshEntries(); toast('备注已保存', 'ok'); }
+        try { await Api.updateField(e.id, 'notes', body.querySelector('#qnInput').value, State.currentProfileId); m.close(); await syncEntryAfterChange(e.id, { searchable: true, notes: true }); toast('备注已保存', 'ok'); }
         catch (err) { toast(err.message, 'err'); }
       }),
     ],
@@ -1213,6 +1392,14 @@ function bindEvents() {
   setupClipboardUpload();
 
   document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      const activeModal = $('#modalRoot').lastChild;
+      if (activeModal?._closeModal) {
+        e.preventDefault();
+        activeModal._closeModal();
+        return;
+      }
+    }
     if (e.target.matches('input, textarea, select')) {
       if (e.key === 'Escape') e.target.blur();
       return;
@@ -1220,7 +1407,9 @@ function bindEvents() {
     if (e.key === '/') { e.preventDefault(); $('#filterKeyword').focus(); }
     else if (e.key.toLowerCase() === 'n') openNewEntry();
     else if (e.key.toLowerCase() === 't' && State.selected.size) tagSelectionFlow();
-    else if (e.key === 'Escape') { const m = $('#modalRoot'); if (m.lastChild) m.lastChild.remove(); }
+    else if (e.key === 'Escape' && State.selected.size) {
+      State.selected.clear(); State.lastSelectedId = null; renderEntries();
+    }
     else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'a') { e.preventDefault(); selectAllVisible(); }
   });
 }
@@ -1265,6 +1454,7 @@ function modal({ title, subhead, titleChip, body, footer, wide, onClose }) {
     if (onClose) onClose();
     mask.remove();
   };
+  mask._closeModal = close;
   closeBtn.onclick = close;
   mask.onclick = (e) => { if (e.target === mask) close(); };
   return { mask, body: bodyEl, close, foot };
@@ -2117,9 +2307,9 @@ function batchGroupSummary(g) {
 }
 
 // ------------------------------------------------------------------ 条目详情
-async function openEntryDetail(entryId) {
+async function openEntryDetail(entryId, currentDetail = null) {
   let e;
-  try { e = await Api.getEntry(entryId); } catch (err) { toast(err.message, 'err'); return; }
+  try { e = currentDetail || await Api.getEntry(entryId); } catch (err) { toast(err.message, 'err'); return; }
   if (!e) { toast('条目不存在', 'err'); return; }
 
   const body = el('div');
@@ -2280,7 +2470,7 @@ async function openEntryDetail(entryId) {
 
   setupMaterialDrop(body.querySelector('#materialDrop'), entryId, async () => {
     toast('材料已添加', 'ok');
-    mm.close(); openEntryDetail(entryId); await refreshEntries();
+    await reopenEntryDetail(mm, entryId, { affectsStatus: true });
   });
 
   // ---- editable fields (paid_amount, actual_item_name, notes)
@@ -2288,7 +2478,7 @@ async function openEntryDetail(entryId) {
     try {
       await Api.updateEntryProfile(entryId, ev.target.value, State.currentProfileId);
       toast('报账人已更新', 'ok');
-      mm.close(); openEntryDetail(entryId); await refreshEntries();
+      await reopenEntryDetail(mm, entryId, { relist: true });
     } catch (err) { toast(err.message, 'err'); }
   };
 
@@ -2296,9 +2486,14 @@ async function openEntryDetail(entryId) {
   body.querySelectorAll('[data-edit]').forEach((inp) => {
     inp.onchange = async () => {
       try {
-        await Api.updateField(entryId, inp.dataset.edit, inp.value, State.currentProfileId);
+        const field = inp.dataset.edit;
+        await Api.updateField(entryId, field, inp.value, State.currentProfileId);
         toast('已保存', 'ok');
-        await refreshEntries();
+        await syncEntryAfterChange(entryId, {
+          searchable: field === 'actual_item_name' || field === 'notes',
+          notes: field === 'notes',
+          affectsStatus: field === 'paid_amount',
+        });
       } catch (err) { toast(err.message, 'err'); }
     };
   });
@@ -2321,13 +2516,17 @@ async function openEntryDetail(entryId) {
       try {
         await Api.correctLocked(entryId, field, nv, State.currentProfileId);
         toast('已修改并记下', 'ok');
-        mm.close(); openEntryDetail(entryId); await refreshEntries();
+        await reopenEntryDetail(mm, entryId, { relist: true });
       } catch (err) { toast(err.message, 'err'); }
     };
     inp.onblur = commit;
     inp.onkeydown = (ev) => {
       if (ev.key === 'Enter') { ev.preventDefault(); inp.blur(); }
-      if (ev.key === 'Escape') { inp.value = e[field] || ''; wrap.classList.remove('locked-editing'); }
+      if (ev.key === 'Escape' && wrap.classList.contains('locked-editing')) {
+        ev.preventDefault(); ev.stopPropagation();
+        inp.value = e[field] || '';
+        wrap.classList.remove('locked-editing');
+      }
     };
   });
 
@@ -2356,13 +2555,17 @@ async function openEntryDetail(entryId) {
         origVal = nv;
         td.querySelector('.cell-val').textContent = nv || '\u2014';
         toast('已保存', 'ok');
-        await refreshEntries();
+        await syncEntryAfterChange(entryId, { searchable: true });
       } catch (err) { toast(err.message, 'err'); }
     };
     inp.onblur = commit;
     inp.onkeydown = (ev) => {
       if (ev.key === 'Enter') { ev.preventDefault(); inp.blur(); }
-      if (ev.key === 'Escape') { inp.value = origVal; td.classList.remove('editing'); }
+      if (ev.key === 'Escape' && td.classList.contains('editing')) {
+        ev.preventDefault(); ev.stopPropagation();
+        inp.value = origVal;
+        td.classList.remove('editing');
+      }
       if (ev.key === 'Tab') {
         ev.preventDefault();
         inp.blur();
@@ -2386,7 +2589,7 @@ async function openEntryDetail(entryId) {
       try {
         await Api.deleteItem(parseInt(btn.dataset.delItem, 10));
         toast('已删除', 'ok');
-        mm.close(); openEntryDetail(entryId); await refreshEntries();
+        await reopenEntryDetail(mm, entryId, { searchable: true });
       } catch (err) { toast(err.message, 'err'); }
     };
   });
@@ -2396,7 +2599,7 @@ async function openEntryDetail(entryId) {
     try {
       await Api.addItem(entryId, { name: '', actual_name: '', unit: '', quantity: '', unit_price: '', total: '' });
       toast('已添加', 'ok');
-      mm.close(); openEntryDetail(entryId); await refreshEntries();
+      await reopenEntryDetail(mm, entryId, { searchable: true });
     } catch (err) { toast(err.message, 'err'); }
   };
 
@@ -2427,7 +2630,7 @@ async function openEntryDetail(entryId) {
         if (!path) return;
         await Api.updateAttachment(att.id, { src_path: path, type });
         toast('附件已替换', 'ok');
-        mm.close(); openEntryDetail(entryId); await refreshEntries();
+        await reopenEntryDetail(mm, entryId, { affectsStatus: true });
       } catch (err) { toast(err.message, 'err'); }
     };
   });
@@ -2436,7 +2639,7 @@ async function openEntryDetail(entryId) {
       try {
         await Api.updateAttachment(sel.dataset.attType, { type: sel.value });
         toast('附件类型已更新', 'ok');
-        mm.close(); openEntryDetail(entryId); await refreshEntries();
+        await reopenEntryDetail(mm, entryId, { affectsStatus: true });
       } catch (err) { toast(err.message, 'err'); }
     };
   });
@@ -2448,7 +2651,7 @@ async function openEntryDetail(entryId) {
   });
   body.querySelectorAll('[data-del-att]').forEach((b) => {
     b.onclick = async () => {
-      try { await Api.deleteAttachment(b.dataset.delAtt); toast('已删除', 'ok'); mm.close(); openEntryDetail(entryId); await refreshEntries(); }
+      try { await Api.deleteAttachment(b.dataset.delAtt); toast('已删除', 'ok'); await reopenEntryDetail(mm, entryId, { affectsStatus: true }); }
       catch (err) { toast(err.message, 'err'); }
     };
   });

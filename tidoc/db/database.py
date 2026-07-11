@@ -14,7 +14,9 @@ class Database:
         self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA foreign_keys = ON")
+        self.conn.execute("PRAGMA busy_timeout = 5000")
         self.conn.execute("PRAGMA journal_mode = WAL")
+        self.conn.execute("PRAGMA synchronous = NORMAL")
         init_db(self.conn)
 
     def close(self) -> None:

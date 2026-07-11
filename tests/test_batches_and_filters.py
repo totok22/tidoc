@@ -124,6 +124,31 @@ def test_batch_filter_on_entries(repos, sample_xmls):
     assert len(outside) == 2
 
 
+def test_entry_list_uses_bounded_query_count(repos, sample_xmls):
+    _make_entries(repos, sample_xmls, 3)
+    statements = []
+    repos["db"].conn.set_trace_callback(statements.append)
+    try:
+        entries = repos["entries"].list()
+    finally:
+        repos["db"].conn.set_trace_callback(None)
+
+    selects = [sql for sql in statements if sql.lstrip().upper().startswith("SELECT")]
+    assert len(entries) == 3
+    assert len(selects) == 4
+
+
+def test_amount_filter_and_sort_are_numeric(repos):
+    profile = repos["profiles"].create("张三", "李老师")
+    for total in ("9.00", "80.00", "100.00"):
+        entry_id = repos["entries"].create(profile["id"])
+        repos["db"].conn.execute("UPDATE entries SET total = ? WHERE id = ?", (total, entry_id))
+    repos["db"].conn.commit()
+
+    assert [e["total"] for e in repos["entries"].list(sort="amount")] == ["100.00", "80.00", "9.00"]
+    assert [e["total"] for e in repos["entries"].list(amount_min="10", amount_max="90")] == ["80.00"]
+
+
 # ------------------------------------------------------------------ 迁移
 
 def test_v1_db_upgrades_to_v2(tmp_path):

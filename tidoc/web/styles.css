@@ -501,6 +501,12 @@ body {
   min-width: 0;
 }
 .entry-card:hover { box-shadow: var(--shadow); transform: translateY(-1px); border-color: #cfd6e0; }
+.entry-card:focus { outline: none; }
+.entry-card:focus-visible {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px var(--primary-soft), var(--shadow);
+}
+.entry-card:focus-visible .entry-open-hint { opacity: 1; }
 .entry-card.card-dragging { border-color: var(--primary); background: var(--primary-soft); }
 .entry-card.selected { background: linear-gradient(180deg, #f3f8ff, #eef4ff); border-color: var(--primary); }
 .entry-check { display: flex; justify-content: center; align-items: center; align-self: stretch; cursor: pointer; border-radius: 7px; }
@@ -853,7 +859,7 @@ code { background: var(--paper-2); padding: 2px 6px; border-radius: 4px; font-si
 .settings-row { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 12px 0; border-bottom: 1px solid var(--line-soft); }
 .settings-row:last-child { border-bottom: none; }
 .settings-block > .settings-row:first-child { padding-top: 14px; }
-.settings-row.is-actionable { cursor: pointer; margin: 0 -16px; padding: 14px 16px; border-radius: 10px; transition: none; }
+.settings-row.is-actionable { cursor: pointer; padding: 14px 0; }
 .settings-row.is-actionable:hover { background: transparent; }
 .settings-row-copy { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
 .settings-row-copy b { font-size: 14px; font-weight: 600; display: flex; align-items: center; gap: 8px; line-height: 1.35; }

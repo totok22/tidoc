@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import uuid
 from datetime import datetime
+from decimal import Decimal, InvalidOperation
 
 from ..engine.models import ParsedInvoice
 from ..engine.money import money
@@ -26,6 +27,7 @@ STATUS_DRAFT = "draft"
 STATUS_PARTIAL = "partial"
 STATUS_COMPLETE = "complete"
 VALID_STATUS = (STATUS_DRAFT, STATUS_PARTIAL, STATUS_COMPLETE)
+QUERY_BATCH_SIZE = 900
 
 
 def _now() -> str:
@@ -194,6 +196,17 @@ class EntryRepo:
             where.append("NOT EXISTS (SELECT 1 FROM batch_entries be WHERE be.entry_id = e.id AND be.batch_id = ?)")
             params.append(filters["not_in_batch_id"])
 
+        for key, operator in (("amount_min", ">="), ("amount_max", "<=")):
+            value = filters.get(key)
+            if value is None or value == "":
+                continue
+            try:
+                normalized = str(money(Decimal(str(value).replace(",", "").strip())))
+            except (InvalidOperation, ValueError) as exc:
+                raise ValueError("金额筛选条件无效") from exc
+            where.append(f"CAST(NULLIF(e.total, '') AS REAL) {operator} CAST(? AS REAL)")
+            params.append(normalized)
+
         sql = "SELECT e.* FROM entries e"
         if where:
             sql += " WHERE " + " AND ".join(where)
@@ -202,7 +215,7 @@ class EntryRepo:
         order = {
             "updated": "e.updated_at DESC",
             "created": "e.created_at DESC",
-            "amount": "e.total DESC",
+            "amount": "CAST(NULLIF(e.total, '') AS REAL) DESC",
             "date": "e.invoice_date DESC",
             "seller": "e.seller ASC",
         }.get(sort, "e.updated_at DESC")
@@ -210,52 +223,59 @@ class EntryRepo:
         rows = self.db.conn.execute(sql, params).fetchall()
 
         result = []
+        entry_ids = [r["id"] for r in rows]
+        modified_by_entry = {entry_id: [] for entry_id in entry_ids}
+        attachments_by_entry = {entry_id: {} for entry_id in entry_ids}
+        fields_by_entry = {entry_id: {} for entry_id in entry_ids}
+        for offset in range(0, len(entry_ids), QUERY_BATCH_SIZE):
+            batch_ids = entry_ids[offset:offset + QUERY_BATCH_SIZE]
+            placeholders = ",".join("?" for _ in batch_ids)
+            modified_rows = self.db.conn.execute(
+                f"SELECT entry_id, field FROM entry_fields "
+                f"WHERE modified = 1 AND field <> 'notes' AND entry_id IN ({placeholders})",
+                batch_ids,
+            ).fetchall()
+            for row in modified_rows:
+                modified_by_entry[row["entry_id"]].append(row["field"])
+
+            attachment_rows = self.db.conn.execute(
+                f"SELECT entry_id, type, COUNT(*) c FROM attachments "
+                f"WHERE entry_id IN ({placeholders}) GROUP BY entry_id, type",
+                batch_ids,
+            ).fetchall()
+            for row in attachment_rows:
+                attachments_by_entry[row["entry_id"]][row["type"]] = row["c"]
+
+            field_rows = self.db.conn.execute(
+                f"SELECT entry_id, field, origin, current, modified FROM entry_fields "
+                f"WHERE entry_id IN ({placeholders})",
+                batch_ids,
+            ).fetchall()
+            for row in field_rows:
+                fields_by_entry[row["entry_id"]][row["field"]] = {
+                    "origin": row["origin"],
+                    "current": row["current"],
+                    "modified": bool(row["modified"]),
+                }
+
         for r in rows:
             entry = _row_to_dict(r)
             entry["tags"] = json.loads(entry.get("tags") or "[]")
             # 列表视图带上人工修改标记摘要与附件数，供 UI 显示角标
-            entry["modified_fields"] = self._modified_fields(entry["id"])
+            entry["modified_fields"] = modified_by_entry[entry["id"]]
             # 按类型统计附件，供 UI 显示「发票/付款/查验」三个完整度状态点
-            type_rows = self.db.conn.execute(
-                "SELECT type, COUNT(*) c FROM attachments WHERE entry_id = ? GROUP BY type",
-                (entry["id"],),
-            ).fetchall()
-            by_type = {tr["type"]: tr["c"] for tr in type_rows}
+            by_type = attachments_by_entry[entry["id"]]
             entry["attachment_count"] = sum(by_type.values())
             entry["attachment_types"] = by_type
             entry["has_invoice"] = bool(by_type.get("invoice_pdf") or by_type.get("invoice_xml"))
             entry["has_payment"] = bool(by_type.get("payment_screenshot"))
             entry["has_inspection"] = bool(by_type.get("inspection_pdf"))
             # 列表附上可改字段当前值（备注 / 实付金额 / 实际物资名），供卡片预览
-            ef = self._fields(entry["id"])
+            ef = fields_by_entry[entry["id"]]
             entry["fields"] = ef
             entry["completeness"] = self._completeness(entry, ef)
             result.append(entry)
-
-        # 金额区间在 Python 侧过滤（total 以字符串存 Decimal）
-        amt_min = filters.get("amount_min")
-        amt_max = filters.get("amount_max")
-        if amt_min is not None or amt_max is not None:
-            from decimal import Decimal
-            def in_range(e):
-                try:
-                    v = Decimal(e.get("total") or "0")
-                except Exception:
-                    return False
-                if amt_min is not None and v < Decimal(str(amt_min)):
-                    return False
-                if amt_max is not None and v > Decimal(str(amt_max)):
-                    return False
-                return True
-            result = [e for e in result if in_range(e)]
         return result
-
-    def _modified_fields(self, entry_id: str) -> list[str]:
-        rows = self.db.conn.execute(
-            "SELECT field FROM entry_fields WHERE entry_id = ? AND modified = 1 AND field <> 'notes'",
-            (entry_id,),
-        ).fetchall()
-        return [r["field"] for r in rows]
 
     @staticmethod
     def _completeness(entry: dict, fields: dict) -> dict:

@@ -8,12 +8,14 @@ from __future__ import annotations
 
 import functools
 import base64
+import binascii
 import json
 import os
 import re
 import subprocess
 import sys
 import time
+import threading
 import webbrowser
 import uuid
 from decimal import Decimal, InvalidOperation
@@ -35,13 +37,16 @@ UPDATE_LAST_CHECK_KEY = "tidoc.update.lastCheck"
 UPDATE_LAST_RESULT_KEY = "tidoc.update.lastResult"
 APP_LAST_SEEN_VERSION_KEY = "tidoc.update.lastSeenVersion"
 AUTO_UPDATE_INTERVAL_SECONDS = 24 * 60 * 60
+MAX_DROPPED_FILE_BYTES = 100 * 1024 * 1024
+MAX_DROPPED_TOTAL_BYTES = 500 * 1024 * 1024
 
 def _guard(func):
     """把返回值包成 {ok:True,...}，异常包成 {ok:False,error:...}。"""
     @functools.wraps(func)
     def wrapper(self, *args, **kwargs):
         try:
-            result = func(self, *args, **kwargs)
+            with self._api_lock:
+                result = func(self, *args, **kwargs)
             if isinstance(result, dict) and "ok" in result:
                 return result
             return {"ok": True, "data": result}
@@ -52,6 +57,7 @@ def _guard(func):
 
 class Api:
     def __init__(self, data_root: str | Path | None = None):
+        self._api_lock = threading.RLock()
         self.data_root = DataRoot(data_root, manage_pointer=True)
         self.db = Database(self.data_root.db_path)
         self.profiles = ProfileRepo(self.db)
@@ -190,6 +196,7 @@ class Api:
         staging = self.data_root.dropped_dir
         staging.mkdir(parents=True, exist_ok=True)
         out = []
+        total_bytes = 0
         for item in (files or []):
             name = _safe_filename(item.get("name") or "dropped-file")
             data_url = item.get("data_url") or ""
@@ -197,7 +204,16 @@ class Api:
                 data_url = data_url.split(",", 1)[1]
             if not data_url:
                 raise ValueError(f"文件内容为空：{name}")
-            raw = base64.b64decode(data_url)
+            estimated_bytes = len(data_url.rstrip("=")) * 3 // 4
+            if estimated_bytes > MAX_DROPPED_FILE_BYTES:
+                raise ValueError(f"文件过大：{name}（单个文件不能超过 100 MB）")
+            if total_bytes + estimated_bytes > MAX_DROPPED_TOTAL_BYTES:
+                raise ValueError("拖入文件总大小不能超过 500 MB")
+            try:
+                raw = base64.b64decode(data_url, validate=True)
+            except (binascii.Error, ValueError) as exc:
+                raise ValueError(f"文件内容无效：{name}") from exc
+            total_bytes += len(raw)
             dest_dir = staging / uuid.uuid4().hex[:8]
             dest_dir.mkdir(parents=True, exist_ok=True)
             dest = dest_dir / name
