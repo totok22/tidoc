@@ -13,10 +13,11 @@ const State = {
   suppressListAnimation: false,
   density: 'comfortable',
   groupBy: 'none',       // 'none' | 'profile' | 'title' —— 列表分组浏览
-  tagFilter: '',         // 高级筛选：按标签
+  tagFilter: '',         // 工具栏筛选：按标签
   notesFilter: '',       // 高级筛选：'' | 'yes' | 'no'（有 / 无记账备注）
   batchFilter: '',       // 当前聚焦的批次 id（在批次内浏览 / 管理）
   batches: [],           // 批次列表缓存
+  currentBatch: null,    // 当前批次详情（含批次级催办备注）
   allTags: [],           // 全库用过的标签
   multiClaimantMode: false,
   activeDetailEntryId: null,
@@ -118,6 +119,7 @@ function wrapSvg(svg, s) {
 
 // ------------------------------------------------------------------ 初始化
 async function init() {
+  setupFastTooltips();
   applyPreferences();
   bindEvents();
   let startupUpdate = null;
@@ -131,6 +133,65 @@ async function init() {
   if (startupUpdate?.upgraded) setTimeout(() => { openReleaseHighlights('updated', startupUpdate); }, 450);
   else await maybeShowFirstUseGuide();
   setTimeout(() => { maybeAutoCheckUpdates(); }, 1200);
+}
+
+function setupFastTooltips() {
+  const tooltip = el('div', 'fast-tooltip');
+  tooltip.setAttribute('role', 'tooltip');
+  document.body.appendChild(tooltip);
+
+  const prepare = (root) => {
+    const nodes = [];
+    if (root.nodeType === Node.ELEMENT_NODE && root.hasAttribute('title')) nodes.push(root);
+    if (root.querySelectorAll) nodes.push(...root.querySelectorAll('[title]'));
+    nodes.forEach((node) => {
+      const value = node.getAttribute('title');
+      if (!value) return;
+      node.dataset.tooltip = value;
+      node.removeAttribute('title');
+      if (!node.getAttribute('aria-label') && !node.textContent.trim()) node.setAttribute('aria-label', value);
+    });
+  };
+  prepare(document.body);
+  new MutationObserver((records) => {
+    records.forEach((record) => {
+      if (record.type === 'attributes') prepare(record.target);
+      else record.addedNodes.forEach(prepare);
+    });
+    if (active && !active.isConnected) hide();
+  }).observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['title'] });
+
+  let active = null;
+  const hide = () => {
+    active = null;
+    tooltip.classList.remove('visible');
+  };
+  const show = (target) => {
+    const text = target?.dataset.tooltip;
+    if (!text) return;
+    active = target;
+    tooltip.textContent = text;
+    tooltip.classList.add('visible');
+    const rect = target.getBoundingClientRect();
+    const tip = tooltip.getBoundingClientRect();
+    const left = Math.max(8, Math.min(rect.left + rect.width / 2 - tip.width / 2, window.innerWidth - tip.width - 8));
+    const below = rect.bottom + 7;
+    const top = below + tip.height <= window.innerHeight - 8 ? below : Math.max(8, rect.top - tip.height - 7);
+    tooltip.style.left = `${left}px`;
+    tooltip.style.top = `${top}px`;
+  };
+  document.addEventListener('pointerover', (ev) => {
+    const target = ev.target.closest?.('[data-tooltip]');
+    if (target && target !== active) show(target);
+  });
+  document.addEventListener('pointerout', (ev) => {
+    const next = ev.relatedTarget?.closest?.('[data-tooltip]');
+    if (next !== active) next ? show(next) : hide();
+  });
+  document.addEventListener('focusin', (ev) => show(ev.target.closest?.('[data-tooltip]')));
+  document.addEventListener('focusout', hide);
+  document.addEventListener('scroll', hide, true);
+  window.addEventListener('blur', hide);
 }
 
 async function maybeAutoCheckUpdates(showCurrent = false) {
@@ -346,6 +407,7 @@ function currentFilters() {
 
 async function refreshEntries() {
   try {
+    State.currentBatch = State.batchFilter ? await Api.getBatch(State.batchFilter) : null;
     State.entries = await Api.listEntries(currentFilters());
     if (State.quickView === 'incomplete') {
       State.entries = State.entries.filter((e) => (e.completeness?.status || e.status) !== 'complete');
@@ -380,13 +442,7 @@ function renderEntries() {
 
   empty.hidden = !emptyAll;
   if (emptyAll) renderEmptyState();
-  const hasSelection = State.selected.size > 0;
-  $('#selectionBar').classList.toggle('hidden', !hasSelection);
-  $('#selCount').textContent = hasSelection ? `已选 ${State.selected.size}` : '未选择';
-  ['clearSelBtn', 'addToBatchBtn', 'tagBtn', 'batchSummaryBtn', 'batchExportBtn', 'batchPrintBtn', 'batchDeleteBtn'].forEach((id) => {
-    const btn = $('#' + id);
-    if (btn) btn.disabled = !hasSelection;
-  });
+  updateSelectionBar();
   if (!State.entries.some((entry) => entry.id === State.focusedEntryId)) {
     State.focusedEntryId = State.entries[0]?.id || null;
   }
@@ -395,6 +451,17 @@ function renderEntries() {
   });
   if (restoreFocusId) focusEntryCard(restoreFocusId, false);
   State.suppressListAnimation = false;
+}
+
+function updateSelectionBar() {
+  const hasSelection = State.selected.size > 0;
+  $('#selectionBar').classList.toggle('empty', !hasSelection);
+  $('#selCount').textContent = hasSelection ? `已选 ${State.selected.size}` : '选择条目';
+  $('#clearSelBtn').classList.toggle('hidden', !hasSelection);
+  ['clearSelBtn', 'addToBatchBtn', 'tagBtn', 'batchSummaryBtn', 'batchExportBtn', 'batchPrintBtn', 'batchDeleteBtn'].forEach((id) => {
+    const btn = $('#' + id);
+    if (btn) btn.disabled = !hasSelection;
+  });
 }
 
 function updateListSummary() {
@@ -491,21 +558,21 @@ function entryCard(e) {
 
   const check = el('div', 'entry-check');
   check.title = '切换选中';
-  check.onclick = (ev) => { ev.stopPropagation(); toggleSelect(e.id, ev.shiftKey); };
+  check.onclick = (ev) => { ev.stopPropagation(); if (ev.detail > 1) return; toggleSelect(e.id, ev.shiftKey); };
   check.ondblclick = (ev) => { ev.preventDefault(); ev.stopPropagation(); };
   const cb = el('input');
   cb.type = 'checkbox'; cb.checked = State.selected.has(e.id);
-  cb.onclick = (ev) => { ev.stopPropagation(); toggleSelect(e.id, ev.shiftKey); };
+  cb.onclick = (ev) => { ev.stopPropagation(); if (ev.detail > 1) { ev.preventDefault(); return; } toggleSelect(e.id, ev.shiftKey); };
   cb.ondblclick = (ev) => { ev.preventDefault(); ev.stopPropagation(); };
   check.appendChild(cb);
 
   const stripe = el('div', 'entry-stripe');
   stripe.title = '切换选中';
-  stripe.onclick = (ev) => { ev.stopPropagation(); toggleSelect(e.id, ev.shiftKey); };
+  stripe.onclick = (ev) => { ev.stopPropagation(); if (ev.detail > 1) return; toggleSelect(e.id, ev.shiftKey); };
   stripe.ondblclick = (ev) => { ev.preventDefault(); ev.stopPropagation(); };
 
   const modified = (e.modified_fields && e.modified_fields.length)
-    ? `<span class="badge modified" title="有 ${e.modified_fields.length} 个字段被人工修改">${iconPencil(11)}已改 ${e.modified_fields.length}</span>` : '';
+    ? `<span class="badge modified">${iconPencil(11)}已改 ${e.modified_fields.length}</span>` : '';
   // 校验状态：仅在 warning/blocked 时突出显示（pass 不占视觉）
   const checkBadge = (e.check_status && e.check_status !== 'pass')
     ? `<span class="badge ${e.check_status}" title="${esc(e.check_message || '')}">${CHECK_LABEL[e.check_status] || ''}</span>` : '';
@@ -528,7 +595,7 @@ function entryCard(e) {
   const itemTitle = actualCur || (e.items && e.items[0] && (e.items[0].actual_name || e.items[0].name)) || '未填物资名称';
   const notesPreview = notesCur
     ? `<span class="notes-preview important" title="${esc(notesCur)}">${iconNote(12)}${esc(notesCur)}</span>`
-    : '<span class="notes-preview muted">无备注</span>';
+    : '';
   const paidDiff = paidCur && !sameMoney(paidCur, e.total);
   const actionBtn = (action, label, on, title) => (
     `<button class="${on ? 'done' : ''}" data-card-action="${action}" title="${esc(title)}">` +
@@ -556,23 +623,29 @@ function entryCard(e) {
     main.insertAdjacentHTML('beforeend',
       `<div class="entry-tags">${tags.map((t) => `<span class="entry-tag">${esc(t)}</span>`).join('')}</div>`);
   }
+  const batchNote = State.currentBatch?.entry_notes?.[e.id];
+  if (batchNote) {
+    main.insertAdjacentHTML('beforeend', `<div class="batch-entry-note" title="${esc(batchNote)}">${iconNote(12)}${esc(batchNote)}</div>`);
+  }
 
   const right = el('div', 'entry-right');
   right.innerHTML = `
     <div class="entry-total">${fmtMoney(e.total)}</div>
     ${paidDiff ? `<div class="entry-paid diff" title="实付金额与发票金额不同">实付 <b>${fmtMoney(paidCur)}</b><span>差异</span></div>` : ''}
+    <button class="entry-detail-action" data-card-action="detail">打开详情</button>
     <div class="entry-inline-actions">
       ${actionBtn('invoice', '发票', e.has_invoice, e.has_invoice ? '已添加发票材料；点击补充发票 PDF' : '添加发票 PDF')}
       ${actionBtn('paid', '实付', !!paidCur, paidCur ? '已填写实付金额；点击修改' : '填写实付金额')}
       ${actionBtn('pay', '付款', e.has_payment, e.has_payment ? '已添加付款截图；点击继续添加' : '添加付款截图')}
       ${actionBtn('inspect', '查验', e.has_inspection, e.has_inspection ? '已添加查验单；点击继续添加' : '添加查验单')}
-    </div>
-    <div class="entry-open-hint">双击打开</div>`;
+    </div>`;
   right.querySelectorAll('[data-card-action]').forEach((b) => {
     b.onclick = async (ev) => {
       ev.stopPropagation();
+      if (ev.detail > 1) { ev.preventDefault(); return; }
       const action = b.dataset.cardAction;
-      if (action === 'invoice') await quickAddAttachment(e.id, 'invoice_pdf');
+      if (action === 'detail') await openEntryDetail(e.id);
+      else if (action === 'invoice') await quickAddAttachment(e.id, 'invoice_pdf');
       else if (action === 'paid') await quickPaidFlow(e);
       else if (action === 'pay') await quickAddAttachment(e.id, 'payment_screenshot');
       else if (action === 'inspect') await quickAddAttachment(e.id, 'inspection_pdf');
@@ -581,28 +654,14 @@ function entryCard(e) {
   });
 
   card.append(check, stripe, main, right);
-  let selectTimer = null;
   card.onclick = (ev) => {
-    if (selectTimer) clearTimeout(selectTimer);
+    if (ev.detail > 1) {
+      ev.preventDefault();
+      return;
+    }
     State.focusedEntryId = e.id;
     card.focus({ preventScroll: true });
-    const willSelect = !State.selected.has(e.id);
-    card.classList.toggle('selected', willSelect);
-    card.setAttribute('aria-selected', willSelect ? 'true' : 'false');
-    cb.checked = willSelect;
-    selectTimer = setTimeout(() => {
-      selectTimer = null;
-      toggleSelect(e.id, ev.shiftKey);
-    }, 260);
-  };
-  card.ondblclick = (ev) => {
-    ev.preventDefault();
-    if (selectTimer) clearTimeout(selectTimer);
-    selectTimer = null;
-    card.classList.toggle('selected', State.selected.has(e.id));
-    card.setAttribute('aria-selected', State.selected.has(e.id) ? 'true' : 'false');
-    cb.checked = State.selected.has(e.id);
-    openEntryDetail(e.id);
+    selectEntryFromCard(e.id, ev.shiftKey);
   };
   card.onfocus = () => {
     State.focusedEntryId = e.id;
@@ -839,6 +898,34 @@ function toggleSelect(id, range) {
   State.lastSelectedId = id;
   renderEntries();
 }
+
+function selectEntryFromCard(id, range) {
+  if (range && State.lastSelectedId) {
+    const ids = State.entries.map((entry) => entry.id);
+    const start = ids.indexOf(State.lastSelectedId);
+    const end = ids.indexOf(id);
+    if (start >= 0 && end >= 0) {
+      const [from, to] = start < end ? [start, end] : [end, start];
+      ids.slice(from, to + 1).forEach((entryId) => State.selected.add(entryId));
+    }
+  } else {
+    if (State.selected.has(id)) State.selected.delete(id);
+    else State.selected.add(id);
+  }
+  State.lastSelectedId = id;
+  syncVisibleSelectionState();
+}
+
+function syncVisibleSelectionState() {
+  entryCards().forEach((card) => {
+    const selected = State.selected.has(card.dataset.entryId);
+    card.classList.toggle('selected', selected);
+    card.setAttribute('aria-selected', selected ? 'true' : 'false');
+    const checkbox = card.querySelector('.entry-check input');
+    if (checkbox) checkbox.checked = selected;
+  });
+  updateSelectionBar();
+}
 async function selectAllVisible() {
   State.suppressListAnimation = true;
   State.selected.clear();
@@ -849,57 +936,17 @@ async function selectAllVisible() {
 // ------------------------------------------------------------------ 批次（运营组）
 async function loadBatches() {
   try {
-    State.batches = await Api.listBatches($('#showArchivedBatches')?.checked);
+    State.batches = await Api.listBatches(true);
   } catch (e) { State.batches = []; }
-  renderBatchList();
-  renderBatchSelect();
   renderBatchFolders();
-}
-
-function renderBatchList() {
-  const wrap = $('#batchList');
-  if (!wrap) return;
-  wrap.innerHTML = '';
-
-  // “全部条目”入口（退出批次聚焦）
-  const allItem = el('div', 'batch-item' + (State.batchFilter ? '' : ' active'));
-  allItem.innerHTML = `<span class="batch-item-name">全部条目</span>`;
-  allItem.onclick = () => focusBatch('');
-  wrap.appendChild(allItem);
-
-  if (!State.batches.length) {
-    wrap.appendChild(el('div', 'batch-empty', '还没有批次。<br/>把要一起交的条目圈成一批，方便催办和导出。'));
-    return;
-  }
-
-  State.batches.forEach((b) => {
-    const item = el('div', 'batch-item' + (State.batchFilter === b.id ? ' active' : '') + (b.archived ? ' archived' : ''));
-    const st = b.stats || { count: b.count || 0, incomplete: 0, total: '0' };
-    item.innerHTML = `
-      <span class="batch-item-name" title="${esc(b.name)}">${esc(b.name)}</span>
-      <span class="batch-item-meta">
-        <span>${st.count} 条</span>
-        ${st.incomplete ? `<span class="batch-warn" title="${st.incomplete} 条尚未齐备">缺 ${st.incomplete}</span>` : '<span class="batch-ok">齐</span>'}
-      </span>`;
-    item.onclick = () => focusBatch(b.id);
-    item.oncontextmenu = (ev) => { ev.preventDefault(); openBatchMenu(ev.clientX, ev.clientY, b); };
-    wrap.appendChild(item);
-  });
-}
-
-function renderBatchSelect() {
-  const sel = $('#filterBatch');
-  if (!sel) return;
-  const cur = State.batchFilter;
-  sel.innerHTML = '<option value="">全部</option>' + State.batches.map((b) =>
-    `<option value="${esc(b.id)}"${b.id === cur ? ' selected' : ''}>${esc(b.name)}</option>`).join('');
 }
 
 function renderBatchFolders() {
   const wrap = $('#batchFolders');
   if (!wrap) return;
   const folders = State.batches.filter((b) => !b.archived);
-  if (!folders.length && !State.batchFilter) {
+  const archived = State.batches.filter((b) => b.archived);
+  if (!folders.length && !archived.length && !State.batchFilter) {
     wrap.innerHTML = '';
     wrap.classList.add('hidden');
     return;
@@ -914,7 +961,8 @@ function renderBatchFolders() {
           <button class="folder-menu" data-folder-menu="${esc(b.id)}" title="批次操作">⋯</button>
         </span>`;
       }).join('')}
-      <button class="batch-folder new" id="folderNewBatch">新建批次</button>`;
+      <button class="batch-folder new" id="folderNewBatch">新建批次</button>
+      ${archived.length ? `<button class="batch-archive-link" id="archivedBatchesBtn">已归档 ${archived.length}</button>` : ''}`;
   }
   wrap.querySelectorAll('[data-folder]').forEach((node) => {
     node.onclick = (ev) => {
@@ -931,14 +979,14 @@ function renderBatchFolders() {
   });
   const newBtn = $('#folderNewBatch');
   if (newBtn) newBtn.onclick = () => newBatchFlow();
+  const archivedBtn = $('#archivedBatchesBtn');
+  if (archivedBtn) archivedBtn.onclick = openArchivedBatchesFlow;
 }
 
 function focusBatch(batchId) {
   State.batchFilter = batchId || '';
-  const sel = $('#filterBatch');
-  if (sel) sel.value = State.batchFilter;
+  State.currentBatch = null;
   State.selected.clear();
-  renderBatchList();
   renderBatchContext();
   renderBatchFolders();
   refreshEntries();
@@ -948,18 +996,29 @@ function renderBatchContext() {
   const bar = $('#batchContext');
   if (!bar) return;
   if (!State.batchFilter) { bar.classList.add('hidden'); bar.innerHTML = ''; return; }
-  const b = State.batches.find((x) => x.id === State.batchFilter);
-  if (!b) { bar.classList.add('hidden'); return; }
-  const st = b.stats || {};
-  // 批次名、条数、缺料数和总额已由批次标签与列表统计表达，这里只保留按人拆分和整批动作。
-  const persons = (st.by_person || []).map((p) =>
-    `<span class="ctx-person">${esc(p.name)} <b>${p.count}</b>${p.incomplete ? ` <i title="${p.incomplete} 条未齐">缺${p.incomplete}</i>` : ''}</span>`).join('');
-  bar.classList.remove('hidden');
-  bar.innerHTML = `
-    <div class="ctx-left">
-      ${persons ? `<span class="ctx-persons">${persons}</span>` : '<span class="ctx-persons muted">暂无人员拆分</span>'}
-    </div>`;
-  // 重命名 / 归档 / 删除统一走 tab 的「⋯」菜单，此处不重复。
+  const batch = State.currentBatch || State.batches.find((item) => item.id === State.batchFilter);
+  if (!batch) { bar.classList.add('hidden'); bar.innerHTML = ''; return; }
+  const people = (batch.stats?.by_person || []).map((person) =>
+    `<span><b>${esc(person.name)}</b> ${person.count} 条 · ${fmtMoney(person.total)}${person.incomplete ? ` · <i>缺 ${person.incomplete}</i>` : ''}</span>`).join('');
+  bar.innerHTML = `${batch.note ? `<span class="batch-context-note">${esc(batch.note)}</span>` : ''}${people ? `<span class="batch-context-people">${people}</span>` : ''}`;
+  bar.classList.toggle('hidden', !bar.textContent.trim());
+}
+
+function openArchivedBatchesFlow() {
+  const archived = State.batches.filter((batch) => batch.archived);
+  const body = el('div');
+  body.innerHTML = archived.length ? `<div class="archived-batch-list">${archived.map((batch) => `
+    <div class="archived-batch-row">
+      <div class="archived-batch-name"><b>${esc(batch.name)}</b><span>${batch.stats?.count || 0} 条</span></div>
+      <button class="btn small ghost" data-restore-batch="${esc(batch.id)}">恢复</button>
+    </div>`).join('')}</div>` : '<div class="hint">没有已归档批次。</div>';
+  const m = modal({ title: '已归档批次', body, footer: [mkBtn('关闭', 'ghost', () => m.close())] });
+  body.querySelectorAll('[data-restore-batch]').forEach((btn) => {
+    btn.onclick = async () => {
+      await Api.archiveBatch(btn.dataset.restoreBatch, false);
+      m.close(); await loadBatches(); toast('批次已恢复', 'ok');
+    };
+  });
 }
 
 function openBatchMenu(x, y, b) {
@@ -974,6 +1033,7 @@ function openBatchMenu(x, y, b) {
   item('重命名', () => renameBatchFlow(b));
   item(b.archived ? '取消归档' : '归档', async () => {
     await Api.archiveBatch(b.id, !b.archived); await loadBatches();
+    if (!b.archived && State.batchFilter === b.id) focusBatch('');
     toast(b.archived ? '已取消归档' : '已归档', 'ok');
   });
   item('删除批次', async () => {
@@ -1000,7 +1060,10 @@ async function renameBatchFlow(b) {
       if (!name) { toast('名称不能为空', 'err'); return; }
       try {
         await Api.updateBatch(b.id, { name, note: body.querySelector('#bNote').value });
-        m.close(); await loadBatches(); renderBatchContext(); toast('已保存', 'ok');
+        m.close(); await loadBatches();
+        if (State.batchFilter === b.id) await refreshEntries();
+        else renderBatchContext();
+        toast('已保存', 'ok');
       } catch (e) { toast(e.message, 'err'); }
     })],
   });
@@ -1012,10 +1075,9 @@ async function newBatchFlow(presetIds) {
   const body = el('div');
   body.innerHTML = `
     <div class="form-row"><label>批次名称</label><input id="bName" placeholder="如：7月第一批 / 张三这次的"/></div>
-    <div class="form-row"><label>说明（可选）</label><input id="bNote" placeholder="备注这批的用途"/></div>
-    <div class="hint">${ids.length ? `将把当前选中的 <b>${ids.length}</b> 条装入新批次。` : '创建空批次，之后再从列表选条目加入。'}</div>`;
+    <div class="form-row"><label>说明（可选）</label><input id="bNote" placeholder="备注这批的用途"/></div>`;
   const m = modal({
-    title: '新建批次', body,
+    title: ids.length ? `新建批次 · ${ids.length} 条` : '新建批次', body,
     footer: [mkBtn('取消', 'ghost', () => m.close()), mkBtn('创建', 'primary', async () => {
       const name = body.querySelector('#bName').value.trim();
       if (!name) { toast('请填批次名称', 'err'); return; }
@@ -1029,27 +1091,59 @@ async function newBatchFlow(presetIds) {
   setTimeout(() => body.querySelector('#bName')?.focus(), 20);
 }
 
-// 把选中条目加入批次（可选已有批次或新建）
-async function addSelectionToBatch() {
-  const ids = [...State.selected];
+// 调整选中条目的批次归属：加入、移出当前批次，或从当前批次移动到另一批次。
+async function addSelectionToBatch(idsArg) {
+  const fromSelection = !Array.isArray(idsArg);
+  const ids = fromSelection ? [...State.selected] : idsArg;
   if (!ids.length) { toast('请先选择条目', 'err'); return; }
   await loadBatches();
+  let memberships = [];
+  try { memberships = await Promise.all(ids.map((id) => Api.batchesOfEntry(id))); }
+  catch (e) { toast(e.message, 'err'); return; }
+  const memberCounts = new Map();
+  memberships.forEach((rows) => rows.forEach((batch) => {
+    memberCounts.set(batch.id, (memberCounts.get(batch.id) || 0) + 1);
+  }));
   const body = el('div');
-  const options = State.batches.filter((b) => !b.archived).map((b) =>
-    `<button class="batch-pick" data-batch="${b.id}"><b>${esc(b.name)}</b><span>${b.stats?.count || 0} 条</span></button>`).join('');
-  body.innerHTML = `
-    <div class="hint">把选中的 <b>${ids.length}</b> 条加入哪个批次？</div>
-    <div class="batch-pick-list">${options || '<div class="hint">还没有批次。</div>'}</div>`;
+  const current = State.batchFilter && State.batches.find((b) => b.id === State.batchFilter);
+  const rows = State.batches.filter((batch) => !batch.archived).map((batch) => {
+    const count = memberCounts.get(batch.id) || 0;
+    const toggleLabel = count === ids.length ? '移出' : count ? '补齐' : '装入';
+    const state = count === ids.length ? '已装入' : count ? `${count}/${ids.length} 条` : `${batch.stats?.count || 0} 条`;
+    return `<div class="batch-membership-row${batch.id === State.batchFilter ? ' current' : ''}">
+      <div class="batch-membership-name"><b>${esc(batch.name)}</b><span>${state}</span></div>
+      <div class="batch-membership-actions">
+        <button class="btn small ghost${count === ids.length ? ' danger-text' : ''}" data-toggle-batch="${esc(batch.id)}" data-member-count="${count}">${toggleLabel}</button>
+        ${current && batch.id !== current.id ? `<button class="btn small ghost" data-move-batch="${esc(batch.id)}">移动</button>` : ''}
+      </div>
+    </div>`;
+  }).join('');
+  body.innerHTML = `<div class="batch-membership-list">${rows || '<div class="hint">还没有批次。</div>'}</div>`;
+  const footer = [mkBtn('关闭', 'ghost', () => m.close()), mkBtn('新建批次', 'primary', () => { m.close(); newBatchFlow(ids); })];
   const m = modal({
-    title: '加入批次', body,
-    footer: [mkBtn('取消', 'ghost', () => m.close()), mkBtn('＋ 新建批次装入', 'primary', () => { m.close(); newBatchFlow(ids); })],
+    title: `批次 · ${ids.length} 条`, body, footer,
   });
-  body.querySelectorAll('[data-batch]').forEach((btn) => {
+  body.querySelectorAll('[data-toggle-batch]').forEach((btn) => {
     btn.onclick = async () => {
       try {
-        const r = await Api.addEntriesToBatch(btn.dataset.batch, ids);
-        m.close(); await loadBatches(); renderBatchContext();
-        toast(`已加入 ${r.added} 条`, 'ok');
+        const batchId = btn.dataset.toggleBatch;
+        const allInside = Number(btn.dataset.memberCount) === ids.length;
+        const r = allInside
+          ? await Api.removeEntriesFromBatch(batchId, ids)
+          : await Api.addEntriesToBatch(batchId, ids);
+        m.close(); if (fromSelection) State.selected.clear(); await loadBatches();
+        await refreshEntries();
+        toast(allInside ? `已移出 ${r.removed} 条` : `已装入 ${r.added} 条`, 'ok');
+      } catch (e) { toast(e.message, 'err'); }
+    };
+  });
+  body.querySelectorAll('[data-move-batch]').forEach((btn) => {
+    btn.onclick = async () => {
+      try {
+        const targetId = btn.dataset.moveBatch;
+        await Api.moveEntriesBetweenBatches(current.id, targetId, ids);
+        m.close(); if (fromSelection) State.selected.clear(); await loadBatches(); focusBatch(targetId);
+        toast(`已移动 ${ids.length} 条`, 'ok');
       } catch (e) { toast(e.message, 'err'); }
     };
   });
@@ -1061,15 +1155,29 @@ async function tagSelectionFlow(idsArg) {
   if (!ids.length) { toast('请先选择条目', 'err'); return; }
   try { State.allTags = await Api.listTags(); } catch (e) { State.allTags = []; }
   const body = el('div');
-  const existing = State.allTags.map((t) => `<button class="tag-pick" data-tag="${esc(t)}">${esc(t)}</button>`).join('');
+  const selectedEntries = State.entries.filter((entry) => ids.includes(entry.id));
+  const tagCounts = new Map();
+  selectedEntries.forEach((entry) => (entry.tags || []).forEach((tag) => tagCounts.set(tag, (tagCounts.get(tag) || 0) + 1)));
+  const existing = State.allTags.map((t) => {
+    const count = tagCounts.get(t) || 0;
+    return `<button class="tag-pick${count === ids.length ? ' applied' : count ? ' partial' : ''}" data-tag="${esc(t)}" data-count="${count}">${esc(t)}</button>`;
+  }).join('');
   body.innerHTML = `
-    <div class="segmented compact" style="margin-bottom:12px">
+    <div class="tag-toolbar">
+      <div class="segmented compact">
       <button class="seg active" data-mode="add">添加</button>
       <button class="seg" data-mode="remove">移除</button>
+      </div>
     </div>
-    <div class="form-row"><label>条目标签</label><input id="tagInput" placeholder="输入标签后回车"/></div>
-    ${existing ? `<div class="tag-cloud-label">已用过的标签</div><div class="tag-cloud">${existing}</div>` : ''}`;
+    <div class="form-row"><input id="tagInput" placeholder="输入新标签，按回车应用"/></div>
+    ${existing ? `<div class="tag-cloud">${existing}</div>` : ''}`;
   let mode = 'add';
+  const syncTagChoices = () => {
+    body.querySelectorAll('[data-tag]').forEach((btn) => {
+      const count = Number(btn.dataset.count || 0);
+      btn.disabled = mode === 'add' ? count === ids.length : count === 0;
+    });
+  };
   const apply = async (tag) => {
     tag = (tag || '').trim();
     if (!tag) return;
@@ -1081,19 +1189,73 @@ async function tagSelectionFlow(idsArg) {
     } catch (e) { toast(e.message, 'err'); }
   };
   const m = modal({
-    title: '条目标签', body,
-    footer: [mkBtn('完成', 'ghost', () => m.close())],
+    title: `标签 · ${ids.length} 条`, body,
+    footer: [
+      ...(State.allTags.length ? [mkBtn('管理标签', 'ghost', () => { m.close(); manageTagsFlow(); })] : []),
+      mkBtn('关闭', 'ghost', () => m.close()),
+    ],
   });
   const input = body.querySelector('#tagInput');
   body.querySelectorAll('[data-mode]').forEach((btn) => {
     btn.onclick = () => {
       mode = btn.dataset.mode;
       body.querySelectorAll('[data-mode]').forEach((b) => b.classList.toggle('active', b === btn));
+      input.placeholder = mode === 'add' ? '输入新标签，按回车应用' : '输入要移除的标签';
+      syncTagChoices();
     };
   });
   input.onkeydown = (ev) => { if (ev.key === 'Enter') { ev.preventDefault(); apply(input.value); } };
   body.querySelectorAll('[data-tag]').forEach((btn) => { btn.onclick = () => apply(btn.dataset.tag); });
+  syncTagChoices();
   setTimeout(() => input.focus(), 20);
+}
+
+async function manageTagsFlow() {
+  try { State.allTags = await Api.listTags(); } catch (e) { State.allTags = []; }
+  const body = el('div');
+  body.innerHTML = State.allTags.length ? `<div class="tag-manage-list">${State.allTags.map((tag) => `
+    <div class="tag-manage-row" data-managed-tag="${esc(tag)}">
+      <button class="tag-name-btn" data-rename-tag="${esc(tag)}" title="重命名">${esc(tag)}</button>
+      <button class="tag-delete-btn" data-delete-tag="${esc(tag)}" title="删除标签" aria-label="删除标签 ${esc(tag)}">×</button>
+    </div>`).join('')}</div>` : '<div class="hint">还没有标签。</div>';
+  const m = modal({ title: '管理标签', body, footer: [mkBtn('关闭', 'ghost', () => m.close())] });
+  body.querySelectorAll('[data-rename-tag]').forEach((btn) => {
+    btn.onclick = () => { m.close(); renameTagFlow(btn.dataset.renameTag); };
+  });
+  body.querySelectorAll('[data-delete-tag]').forEach((btn) => {
+    btn.onclick = async () => {
+      const tag = btn.dataset.deleteTag;
+      if (!confirm(`从所有条目删除标签「${tag}」？`)) return;
+      try {
+        const r = await Api.deleteTag(tag);
+        if (State.tagFilter === tag) State.tagFilter = '';
+        m.close(); await refreshTagOptions(); await refreshEntries(); await loadBatches();
+        toast(`已从 ${r.changed} 条删除「${tag}」`, 'ok'); manageTagsFlow();
+      } catch (e) { toast(e.message, 'err'); }
+    };
+  });
+}
+
+function renameTagFlow(oldTag) {
+  const body = el('div');
+  body.innerHTML = `<div class="form-row"><input id="renameTagInput" value="${esc(oldTag)}"/></div>`;
+  const m = modal({
+    title: '重命名标签', body,
+    footer: [
+      mkBtn('取消', 'ghost', () => { m.close(); manageTagsFlow(); }),
+      mkBtn('保存', 'primary', async () => {
+        const newTag = body.querySelector('#renameTagInput').value.trim();
+        if (!newTag || newTag === oldTag) return;
+        try {
+          const r = await Api.renameTag(oldTag, newTag);
+          if (State.tagFilter === oldTag) State.tagFilter = newTag;
+          m.close(); await refreshTagOptions(); await refreshEntries(); await loadBatches();
+          toast(`已更新 ${r.changed} 条`, 'ok'); manageTagsFlow();
+        } catch (e) { toast(e.message, 'err'); }
+      }),
+    ],
+  });
+  setTimeout(() => { const input = body.querySelector('#renameTagInput'); input.focus(); input.select(); }, 20);
 }
 
 // ------------------------------------------------------------------ 卡片快捷
@@ -1267,18 +1429,51 @@ function openEntryMenu(x, y, e) {
     b.onclick = async () => { closeEntryMenu(); await fn(); };
     menu.appendChild(b);
   };
-  item('打开条目', () => openEntryDetail(e.id));
+  item('打开详情', () => openEntryDetail(e.id));
   item('填写实付金额', () => quickPaidFlow(e));
   item('添加付款截图', () => quickAddAttachment(e.id, 'payment_screenshot'));
   item('添加查验单', () => quickAddAttachment(e.id, 'inspection_pdf'));
   item('添加发票 PDF', () => quickAddAttachment(e.id, 'invoice_pdf'));
   item('编辑条目备注', () => quickNoteFlow(e));
   item('打标签', () => tagSelectionFlow([e.id]));
+  if (State.batchFilter) item('批次催办备注', () => batchEntryNoteFlow(e));
+  item(State.batchFilter ? '移出当前批次' : '批次', async () => {
+    if (State.batchFilter) {
+      try {
+        const r = await Api.removeEntriesFromBatch(State.batchFilter, [e.id]);
+        State.selected.delete(e.id);
+        await loadBatches();
+        await refreshEntries();
+        toast(r.removed ? '已移出当前批次' : '条目已不在当前批次', 'ok');
+      } catch (err) { toast(err.message, 'err'); }
+      return;
+    }
+    await addSelectionToBatch([e.id]);
+  });
   item('删除条目', () => quickDelete(e), true);
-  menu.style.left = Math.min(x, window.innerWidth - 190) + 'px';
-  menu.style.top = Math.min(y, window.innerHeight - 260) + 'px';
   document.body.appendChild(menu);
+  menu.style.left = Math.max(8, Math.min(x, window.innerWidth - menu.offsetWidth - 8)) + 'px';
+  menu.style.top = Math.max(8, Math.min(y, window.innerHeight - menu.offsetHeight - 8)) + 'px';
   setTimeout(() => document.addEventListener('click', closeEntryMenu, { once: true }), 0);
+}
+
+async function batchEntryNoteFlow(e) {
+  const batch = State.currentBatch || await Api.getBatch(State.batchFilter);
+  const body = el('div');
+  body.innerHTML = `<div class="form-row"><textarea id="batchEntryNote" rows="4" placeholder="这条在本批次中的催办事项">${esc(batch?.entry_notes?.[e.id] || '')}</textarea></div>`;
+  const m = modal({
+    title: '批次催办备注', body,
+    footer: [
+      mkBtn('取消', 'ghost', () => m.close()),
+      mkBtn('保存', 'primary', async () => {
+        try {
+          await Api.setBatchEntryNote(State.batchFilter, e.id, body.querySelector('#batchEntryNote').value.trim());
+          m.close(); await refreshEntries(); toast('批次备注已保存', 'ok');
+        } catch (err) { toast(err.message, 'err'); }
+      }),
+    ],
+  });
+  setTimeout(() => body.querySelector('#batchEntryNote')?.focus(), 20);
 }
 
 function closeEntryMenu() {
@@ -1314,6 +1509,9 @@ async function quickDelete(e) {
 // ------------------------------------------------------------------ 事件
 function bindEvents() {
   if ($('#profilePill')) $('#profilePill').onclick = () => openProfileManager(false);
+  $$('.chip-select select').forEach((select) => {
+    select.addEventListener('change', () => requestAnimationFrame(() => select.blur()));
+  });
 
   $$('[data-view]').forEach((btn) => {
     btn.onclick = () => setQuickView(btn.dataset.view);
@@ -1370,10 +1568,6 @@ function bindEvents() {
   $('#batchPrintBtn').onclick = () => openPrintDialog([...State.selected]);
   $('#batchDeleteBtn').onclick = batchDelete;
 
-  // 批次侧栏
-  $('#newBatchBtn').onclick = () => newBatchFlow();
-  $('#showArchivedBatches').onchange = loadBatches;
-
   // 分组浏览
   $$('[data-group]').forEach((b) => {
     b.onclick = () => {
@@ -1415,7 +1609,7 @@ function bindEvents() {
 }
 
 function clearAllFilters() {
-  ['filterStatus', 'filterCheck', 'filterProfile', 'filterTitle', 'filterBatch', 'filterKeyword', 'filterAmountMin', 'filterAmountMax', 'filterDateFrom', 'filterDateTo', 'filterTag', 'filterNotes'].forEach((id) => { const n = $('#' + id); if (n) n.value = ''; });
+  ['filterStatus', 'filterCheck', 'filterProfile', 'filterTitle', 'filterKeyword', 'filterAmountMin', 'filterAmountMax', 'filterDateFrom', 'filterDateTo', 'filterTag', 'filterNotes'].forEach((id) => { const n = $('#' + id); if (n) n.value = ''; });
   State.quickView = 'all';
   updateQuickViewButtons();
   State.activeTitle = '';
@@ -1983,7 +2177,7 @@ function openUsageGuide(firstRun) {
     <div><b>补齐材料</b><span>付款截图、查验单直接拖到条目卡片或详情材料区。混合粘贴时，能按发票号匹配的查验单会自动归入条目。</span></div>
     <div><b>核对条目</b><span>“待补材料”“识别提醒”“严重问题”可快速筛出需要处理的条目；实付金额和备注在详情中补充。</span></div>
     <div><b>批量处理</b><span>勾选条目后可导出、打印、打标签或装入报账批次。按住 Shift 可连续选择；批次可留催办备注。</span></div>
-    <div><b>常用操作</b><span>右键条目打开更多操作；双击卡片进入详情。空白列表区可拖入发票，条目卡片用于绑定材料。</span></div>
+    <div><b>常用操作</b><span>点击卡片右侧“详情”或右键条目打开详情和更多操作。空白列表区可拖入发票，条目卡片用于绑定材料。</span></div>
     <div><b>打印导出</b><span>导出总览、附件包或打印材料前先勾选条目；打印导出组件可在“设置 → 软件更新”安装或更新。</span></div>`;
   let m;
   const close = () => {

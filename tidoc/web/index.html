@@ -9,23 +9,6 @@
 </head>
 <body>
   <div id="app" class="app">
-    <!-- 批次入口保留给批量工作流，默认不占主界面空间 -->
-    <aside class="sidebar hidden" id="sidebar" aria-hidden="true">
-      <div class="sidebar-head">
-        <span class="sidebar-title">报账批次</span>
-        <button class="sidebar-new" id="newBatchBtn" title="新建批次">
-          <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
-        </button>
-      </div>
-      <div class="batch-list" id="batchList"></div>
-      <div class="sidebar-foot">
-        <label class="mini-check" title="显示已归档批次">
-          <input type="checkbox" id="showArchivedBatches"/>
-          <span>显示已归档</span>
-        </label>
-      </div>
-    </aside>
-
     <!-- 主区 -->
     <div class="main">
       <header class="topbar">
@@ -62,12 +45,13 @@
       <div class="toolbar" id="toolbar">
         <div class="search">
           <svg class="search-ico" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="1.8" fill="none"/><path d="m20 20-3-3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
-          <input id="filterKeyword" type="search" placeholder="搜索发票号、销售方、备注、物资、明细" autocomplete="off"/>
+          <input id="filterKeyword" type="search" placeholder="搜索发票号、销售方、金额、备注、物资" autocomplete="off"/>
           <kbd id="searchKbd">/</kbd>
         </div>
 
         <div class="quick-chips" id="quickChips" aria-label="筛选">
           <label class="chip-select">
+            <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M4 20V8l8-4 8 4v12M8 20v-7h8v7M3 20h18" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg>
             <span class="chip-label">抬头</span>
             <select id="filterTitle">
               <option value="">全部</option>
@@ -76,8 +60,16 @@
             </select>
           </label>
           <label class="chip-select">
+            <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><circle cx="12" cy="8" r="3" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M5 20c.7-4 3-6 7-6s6.3 2 7 6" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
             <span class="chip-label">报账人</span>
             <select id="filterProfile">
+              <option value="">全部</option>
+            </select>
+          </label>
+          <label class="chip-select">
+            <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M4 5h9l7 7-8 8-8-8z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><circle cx="9" cy="10" r="1.3" fill="currentColor"/></svg>
+            <span class="chip-label">标签</span>
+            <select id="filterTag">
               <option value="">全部</option>
             </select>
           </label>
@@ -92,14 +84,14 @@
 
         <div class="toolbar-spacer"></div>
 
-        <button class="chip-toggle" id="advancedToggle" title="高级筛选">
+        <button class="chip-toggle" id="advancedToggle">
           <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M4 6h16M7 12h10M10 18h4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
           <span>高级</span>
           <span class="dot hidden" id="advancedDot"></span>
         </button>
 
-        <label class="chip-select chip-toggle sort-chip" title="排序">
-          <span class="chip-label">排序</span>
+        <label class="chip-select chip-toggle sort-chip">
+          <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M8 6h11M8 12h8M8 18h5M4 5v14" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
           <select id="sortSelect">
             <option value="updated">最近更新</option>
             <option value="created">创建时间</option>
@@ -140,12 +132,6 @@
             </select>
           </div>
           <div class="adv-field">
-            <label>条目标签</label>
-            <select id="filterTag">
-              <option value="">全部</option>
-            </select>
-          </div>
-          <div class="adv-field">
             <label>条目备注</label>
             <select id="filterNotes">
               <option value="">全部</option>
@@ -165,20 +151,37 @@
       <!-- 条目区 -->
       <main class="content">
         <div class="batch-folders" id="batchFolders"></div>
-        <!-- 批次上下文条：当聚焦某批次时显示 -->
         <div class="batch-context hidden" id="batchContext"></div>
-
         <div class="content-head">
-          <div class="stats" id="stats"></div>
-          <div class="selection-bar hidden" id="selectionBar">
-            <span id="selCount">已选 0</span>
-            <button class="btn small ghost" id="clearSelBtn">取消</button>
-            <button class="btn small ghost" id="addToBatchBtn">装入批次</button>
-            <button class="btn small ghost" id="tagBtn">标签</button>
-            <button class="btn small ghost" id="batchSummaryBtn">汇总</button>
-            <button class="btn small ghost" id="batchExportBtn">导出</button>
-            <button class="btn small ghost" id="batchPrintBtn">打印</button>
-            <button class="btn small danger" id="batchDeleteBtn">删除</button>
+          <div class="content-summary">
+            <div class="stats" id="stats"></div>
+          </div>
+          <div class="selection-bar empty" id="selectionBar" aria-label="批量操作">
+            <span id="selCount">选择条目</span>
+            <button class="selection-clear hidden" id="clearSelBtn" title="取消选择" aria-label="取消选择">
+              <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+            </button>
+            <span class="selection-divider"></span>
+            <button class="btn small ghost" id="addToBatchBtn" title="调整所选条目的批次归属">
+              <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M3 7h7l2 2h9v10H3z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg><span>批次</span>
+            </button>
+            <button class="btn small ghost" id="tagBtn" title="添加或移除标签">
+              <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M4 5h9l7 7-8 8-8-8z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><circle cx="9" cy="10" r="1.3" fill="currentColor"/></svg><span>标签</span>
+            </button>
+            <span class="selection-divider"></span>
+            <button class="btn small ghost" id="batchSummaryBtn">
+              <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M5 6h14M5 12h9M5 18h12" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg><span>汇总</span>
+            </button>
+            <button class="btn small ghost" id="batchExportBtn">
+              <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M12 4v11m0 0 4-4m-4 4-4-4M5 20h14" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg><span>导出</span>
+            </button>
+            <button class="btn small ghost" id="batchPrintBtn">
+              <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M7 9V4h10v5M7 17H5a2 2 0 0 1-2-2v-4h18v4a2 2 0 0 1-2 2h-2M7 14h10v6H7z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg><span>打印</span>
+            </button>
+            <span class="selection-divider"></span>
+            <button class="btn small danger selection-delete" id="batchDeleteBtn">
+              <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M5 7h14M9 7V4h6v3m2 0-1 13H8L7 7" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg><span>删除</span>
+            </button>
           </div>
         </div>
 

@@ -42,6 +42,17 @@ def test_batch_remove_and_delete_keeps_entries(repos, sample_xmls):
     assert len(repos["entries"].list()) == 2
 
 
+def test_batch_move_entries(repos, sample_xmls):
+    _, ids = _make_entries(repos, sample_xmls, 2)
+    source = repos["batches"].create("原批次", entry_ids=ids)
+    target = repos["batches"].create("新批次", entry_ids=[ids[0]])
+
+    result = repos["batches"].move_entries(source["id"], target["id"], ids)
+    assert result == {"added": 1, "removed": 2}
+    assert repos["batches"].get(source["id"])["entry_ids"] == []
+    assert set(repos["batches"].get(target["id"])["entry_ids"]) == set(ids)
+
+
 def test_batch_entry_note(repos, sample_xmls):
     _, ids = _make_entries(repos, sample_xmls, 1)
     b = repos["batches"].create("批次")
@@ -104,6 +115,19 @@ def test_tag_add_remove_and_filter(repos, sample_xmls):
     assert "待催办" in repos["entries"].all_tags()
 
 
+def test_tag_rename_merges_and_delete_is_global(repos, sample_xmls):
+    _, ids = _make_entries(repos, sample_xmls, 3)
+    repos["entries"].add_tag(ids[:2], "待催办")
+    repos["entries"].add_tag([ids[1]], "催办")
+
+    assert repos["entries"].rename_tag("待催办", "催办") == 2
+    assert repos["entries"].get(ids[0])["tags"] == ["催办"]
+    assert repos["entries"].get(ids[1])["tags"] == ["催办"]
+
+    assert repos["entries"].delete_tag("催办") == 2
+    assert "催办" not in repos["entries"].all_tags()
+
+
 # ------------------------------------------------------------------ 备注筛选
 
 def test_has_notes_filter(repos, sample_xmls):
@@ -147,6 +171,17 @@ def test_amount_filter_and_sort_are_numeric(repos):
 
     assert [e["total"] for e in repos["entries"].list(sort="amount")] == ["100.00", "80.00", "9.00"]
     assert [e["total"] for e in repos["entries"].list(amount_min="10", amount_max="90")] == ["80.00"]
+
+
+def test_keyword_search_includes_invoice_and_paid_amount(repos):
+    profile = repos["profiles"].create("张三", "李老师")
+    entry_id = repos["entries"].create(profile["id"])
+    repos["db"].conn.execute("UPDATE entries SET total = ? WHERE id = ?", ("1234.50", entry_id))
+    repos["db"].conn.commit()
+    repos["entries"].update_field(entry_id, "paid_amount", "1188.00", profile["id"])
+
+    assert [e["id"] for e in repos["entries"].list(keyword="¥1,234.50")] == [entry_id]
+    assert [e["id"] for e in repos["entries"].list(keyword="1188")] == [entry_id]
 
 
 # ------------------------------------------------------------------ 迁移

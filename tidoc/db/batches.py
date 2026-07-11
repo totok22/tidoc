@@ -100,6 +100,31 @@ class BatchRepo:
         self.db.conn.commit()
         return cur.rowcount
 
+    def move_entries(self, source_batch_id: str, target_batch_id: str, entry_ids: list[str]) -> dict:
+        """把条目从一个批次原子移动到另一批次，避免加入成功但移出失败。"""
+        if source_batch_id == target_batch_id:
+            return {"added": 0, "removed": 0}
+        if not self._exists(source_batch_id) or not self._exists(target_batch_id):
+            raise ValueError("批次不存在。")
+        ids = list(dict.fromkeys(entry_ids or []))
+        if not ids:
+            return {"added": 0, "removed": 0}
+        now = _now()
+        try:
+            added = sum(self._link(target_batch_id, entry_id, now) for entry_id in ids)
+            placeholders = ",".join("?" * len(ids))
+            cur = self.db.conn.execute(
+                f"DELETE FROM batch_entries WHERE batch_id = ? AND entry_id IN ({placeholders})",
+                [source_batch_id, *ids],
+            )
+            self._touch(source_batch_id)
+            self._touch(target_batch_id)
+            self.db.conn.commit()
+            return {"added": added, "removed": cur.rowcount}
+        except Exception:
+            self.db.conn.rollback()
+            raise
+
     def set_entry_note(self, batch_id: str, entry_id: str, note: str) -> dict:
         """设置某条目在该批次内的催办备注。条目若不在批次内则先装入。"""
         row = self.db.conn.execute(

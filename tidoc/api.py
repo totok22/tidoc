@@ -391,6 +391,14 @@ class Api:
     def list_tags(self):
         return self.entries.all_tags()
 
+    @_guard
+    def rename_tag(self, old_tag, new_tag):
+        return {"changed": self.entries.rename_tag(old_tag, new_tag)}
+
+    @_guard
+    def delete_tag(self, tag):
+        return {"changed": self.entries.delete_tag(tag)}
+
     # ------------------------------------------------------------ 批次（运营组工作单元）
     @_guard
     def list_batches(self, include_archived=False):
@@ -424,6 +432,10 @@ class Api:
     @_guard
     def remove_entries_from_batch(self, batch_id, entry_ids):
         return {"removed": self.batches.remove_entries(batch_id, entry_ids or [])}
+
+    @_guard
+    def move_entries_between_batches(self, source_batch_id, target_batch_id, entry_ids):
+        return self.batches.move_entries(source_batch_id, target_batch_id, entry_ids or [])
 
     @_guard
     def set_batch_entry_note(self, batch_id, entry_id, note):

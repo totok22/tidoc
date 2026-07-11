@@ -153,19 +153,24 @@ class EntryRepo:
         if filters.get("seller"):
             where.append("e.seller LIKE ?"); params.append(f"%{filters['seller']}%")
         if filters.get("keyword"):
-            kw = f"%{filters['keyword']}%"
-            # 关键词检索覆盖：发票号 / 销售方 / 购买方抬头 / 备注 / 实际物资名称 / 明细名称 / 分类
+            keyword = str(filters["keyword"]).strip()
+            kw = f"%{keyword}%"
+            amount_kw = f"%{keyword.replace(',', '').replace('¥', '').replace('￥', '').strip()}%"
+            # 关键词检索覆盖：发票号 / 销售方 / 购买方抬头 / 金额 / 实付 / 备注 / 物资 / 明细 / 分类
             where.append("""(
                 e.invoice_no LIKE ? OR e.seller LIKE ? OR e.buyer_name LIKE ?
-                OR e.category LIKE ?
+                OR e.category LIKE ? OR REPLACE(e.total, ',', '') LIKE ?
                 OR EXISTS (SELECT 1 FROM entry_fields ef
                            WHERE ef.entry_id = e.id AND ef.field IN ('notes','actual_item_name')
                              AND ef.current LIKE ?)
+                OR EXISTS (SELECT 1 FROM entry_fields ef
+                           WHERE ef.entry_id = e.id AND ef.field = 'paid_amount'
+                             AND REPLACE(ef.current, ',', '') LIKE ?)
                 OR EXISTS (SELECT 1 FROM items it
                            WHERE it.entry_id = e.id
                              AND (it.name LIKE ? OR it.actual_name LIKE ?))
             )""")
-            params += [kw, kw, kw, kw, kw, kw, kw]
+            params += [kw, kw, kw, kw, amount_kw, kw, amount_kw, kw, kw]
         if filters.get("date_from"):
             where.append("e.invoice_date >= ?"); params.append(filters["date_from"])
         if filters.get("date_to"):
@@ -480,6 +485,40 @@ class EntryRepo:
             changed += 1
         self.db.conn.commit()
         return changed
+
+    def rename_tag(self, old_tag: str, new_tag: str) -> int:
+        """全库重命名标签；若目标标签已存在则合并，返回受影响条目数。"""
+        old_tag = (old_tag or "").strip()
+        new_tag = (new_tag or "").strip()
+        if not old_tag or not new_tag:
+            raise ValueError("标签名称不能为空。")
+        if old_tag == new_tag:
+            return 0
+        changed = 0
+        rows = self.db.conn.execute("SELECT id, tags FROM entries WHERE tags <> '' AND tags <> '[]'").fetchall()
+        for row in rows:
+            tags = json.loads(row["tags"] or "[]")
+            if old_tag not in tags:
+                continue
+            replaced = [new_tag if tag == old_tag else tag for tag in tags]
+            # 保持原顺序，同时处理重命名后与已有标签重复的情况。
+            replaced = list(dict.fromkeys(replaced))
+            self.db.conn.execute(
+                "UPDATE entries SET tags = ? WHERE id = ?",
+                (json.dumps(replaced, ensure_ascii=False), row["id"]),
+            )
+            self._touch(row["id"])
+            changed += 1
+        self.db.conn.commit()
+        return changed
+
+    def delete_tag(self, tag: str) -> int:
+        """从全库所有条目删除标签，返回受影响条目数。"""
+        tag = (tag or "").strip()
+        if not tag:
+            raise ValueError("标签名称不能为空。")
+        rows = self.db.conn.execute("SELECT id FROM entries").fetchall()
+        return self.remove_tag([row["id"] for row in rows], tag)
 
     def all_tags(self) -> list[str]:
         """当前库里用过的全部标签（去重、按字母序），供筛选下拉与自动补全。"""

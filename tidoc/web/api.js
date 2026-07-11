@@ -70,6 +70,8 @@ const Api = (() => {
     addTag: (ids, tag) => call('add_tag', ids, tag),
     removeTag: (ids, tag) => call('remove_tag', ids, tag),
     listTags: () => call('list_tags'),
+    renameTag: (oldTag, newTag) => call('rename_tag', oldTag, newTag),
+    deleteTag: (tag) => call('delete_tag', tag),
 
     listBatches: (includeArchived) => call('list_batches', !!includeArchived),
     getBatch: (id) => call('get_batch', id),
@@ -79,6 +81,7 @@ const Api = (() => {
     deleteBatch: (id) => call('delete_batch', id),
     addEntriesToBatch: (id, entryIds) => call('add_entries_to_batch', id, entryIds || []),
     removeEntriesFromBatch: (id, entryIds) => call('remove_entries_from_batch', id, entryIds || []),
+    moveEntriesBetweenBatches: (sourceId, targetId, entryIds) => call('move_entries_between_batches', sourceId, targetId, entryIds || []),
     setBatchEntryNote: (id, entryId, note) => call('set_batch_entry_note', id, entryId, note || ''),
     batchesOfEntry: (entryId) => call('batches_of_entry', entryId),
 
