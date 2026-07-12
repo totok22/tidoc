@@ -138,7 +138,7 @@ class EntryRepo:
 
     # ------------------------------------------------------------------ 列表 / 筛选
     def list(self, **filters) -> list[dict]:
-        """按抬头、报账人、销售方、状态、类别、关键词、金额区间、日期过滤（设计文档 8.8）。"""
+        """按抬头、报账人、销售方、状态、类别、关键词、金额区间、日期过滤（设计文档 8.7）。"""
         where, params = [], []
         if filters.get("title"):
             where.append("title = ?"); params.append(filters["title"])

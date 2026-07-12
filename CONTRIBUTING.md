@@ -8,15 +8,7 @@
 
 ## 开发环境
 
-```bash
-python3 -m venv .venv
-source .venv/bin/activate          # Windows: .venv\Scripts\activate
-pip install -r requirements-dev.txt
-pip install -r requirements-print.txt   # 可选：启用打印导出组件
-
-pytest                             # 运行测试
-python -m tidoc                    # 启动应用
-```
+环境搭建与启动、测试命令见 [README 开发节](README.md#开发)。
 
 ## 提交改动
 

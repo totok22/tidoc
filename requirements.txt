@@ -4,5 +4,5 @@ pypdf==6.14.2      # 读 PDF 文本
 
 # 以下为标准库，无需安装：xml、sqlite3、hashlib、hmac、zipfile
 
-# 重依赖（python-docx / openpyxl / pikepdf / Pillow / reportlab）全部下沉到
+# 重依赖（python-docx / Pillow / reportlab / pypdf）全部下沉到
 # 「打印导出组件」，按需从 COS 下载，不进核心包。
