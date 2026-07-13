@@ -82,6 +82,55 @@ def test_scan_folder_detects_tax_verification_platform_pdf(tmp_path):
     assert r["ignored"][0]["type"] == "inspection_pdf"
 
 
+def test_scan_folder_skips_pdf_containing_multiple_invoices(tmp_path):
+    from pypdf import PdfWriter
+
+    pdf = tmp_path / "合并发票文件.pdf"
+    writer = PdfWriter()
+    writer.add_blank_page(width=842, height=595)
+    writer.add_metadata({
+        "/Title": "电子发票 发票号码：26952000001672381651",
+        "/Subject": "发票号码：26332000004713530326 开票日期：2026年07月01日",
+    })
+    with pdf.open("wb") as f:
+        writer.write(f)
+
+    r = scan_folder(tmp_path)
+
+    assert r["invoice_pdf_count"] == 0
+    assert not r["groups"]
+    assert r["ignored"][0]["type"] == "other"
+    assert "包含 2 张发票" in r["ignored"][0]["warning"]
+
+
+def test_scan_folder_skips_duplicate_invoice_number_groups(tmp_path, monkeypatch):
+    from pypdf import PdfWriter
+    from tidoc.services import folder_import
+
+    monkeypatch.setattr(
+        folder_import,
+        "_parse_invoice_no",
+        lambda _path, _att_type: ("26957000000168907686", ""),
+    )
+
+    for name in ("下载一.pdf", "下载二.pdf"):
+        writer = PdfWriter()
+        writer.add_blank_page(width=842, height=595)
+        writer.add_metadata({
+            "/Title": "电子发票 发票号码：26957000000168907686 开票日期：2026年07月13日",
+            "/Subject": "购买方 北京理工大学教育基金会 销售方 深圳市立创电子商务有限公司 价税合计",
+        })
+        with (tmp_path / name).open("wb") as f:
+            writer.write(f)
+
+    r = scan_folder(tmp_path)
+
+    assert r["invoice_pdf_count"] == 1
+    assert len(r["groups"]) == 1
+    assert len(r["ignored"]) == 1
+    assert "发票号相同" in r["ignored"][0]["warning"]
+
+
 def test_pdf_content_beats_filename_keyword_for_type_classification(tmp_path):
     from pypdf import PdfWriter
 

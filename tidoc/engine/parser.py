@@ -82,6 +82,15 @@ def _pdf_text(path: Path) -> str:
     return "\n".join((page.extract_text() or "") for page in reader.pages)
 
 
+def _pdf_layout_text(path: Path) -> str:
+    """Extract a second text view that preserves item-column indentation."""
+    reader = PdfReader(str(path))
+    return "\n".join(
+        (page.extract_text(extraction_mode="layout") or "")
+        for page in reader.pages
+    )
+
+
 # 数电普通发票里购买方/销售方信息块通常以「名称:」开头，紧随其后是抬头与税号；
 # 一张发票有两个这样的块：第一个是销售方，第二个是购买方（顺序随版面可变）。
 # 这里用「名称:」标签 + 税号正则做到版面无关的稳定抽取。
@@ -169,6 +178,53 @@ def _split_combined_party_names(line: str) -> list[str]:
     return [line]
 
 
+def _extract_explicit_role_parties(lines: list[str]) -> tuple[str, str, str, str] | None:
+    """Read party names when each ``名称`` is explicitly scoped by a role heading.
+
+    Some invoice text streams keep a clean ``购买方信息 -> 名称`` / ``销售方信息 -> 名称``
+    order even though neither party is one of Tidoc's supported titles.  Preserve those
+    roles instead of falling back to the generic two-name ordering heuristic.
+    """
+    current_role = ""
+    parties = {
+        "buyer": ["", ""],
+        "seller": ["", ""],
+    }
+    for line in lines:
+        norm = _normalize_label(line)
+        if norm in {"购买方信息", "买方信息"}:
+            current_role = "buyer"
+            continue
+        if norm == "销售方信息":
+            current_role = "seller"
+            continue
+        if not current_role:
+            continue
+
+        name_match = re.match(r"名\s*称\s*[:：]\s*(.*)", line)
+        if name_match:
+            tail = name_match.group(1).strip()
+            if not tail or _looks_like_invoice_meta(tail):
+                continue
+            tax_match = _TAX_ID_RE.search(tail)
+            if tax_match:
+                parties[current_role] = [tail[:tax_match.start()].strip(), tax_match.group(0)]
+            else:
+                parties[current_role][0] = tail
+            continue
+
+        if "统一社会信用" in norm or "纳税人识别号" in norm:
+            tax_match = _TAX_ID_RE.search(norm)
+            if tax_match:
+                parties[current_role][1] = tax_match.group(0)
+
+    buyer_name, buyer_tax_id = parties["buyer"]
+    seller_name, seller_tax_id = parties["seller"]
+    if buyer_name and seller_name:
+        return seller_name, seller_tax_id, buyer_name, buyer_tax_id
+    return None
+
+
 def _extract_parties(lines: list[str]) -> tuple[str, str, str, str]:
     """从文本行里抽销售方与购买方：名称 + 税号。
 
@@ -184,6 +240,10 @@ def _extract_parties(lines: list[str]) -> tuple[str, str, str, str]:
            统一社会信用代码: 购买方税号
            统一社会信用代码: 销售方税号
     """
+    explicit = _extract_explicit_role_parties(lines)
+    if explicit:
+        return explicit
+
     parties: list[tuple[str, str]] = []  # (name, tax_id)
     pending = 0          # 仍在等待抬头配对的「名称:」数量
     for line in lines:
@@ -336,7 +396,24 @@ def _parse_loose_amount_tax_line(line: str) -> tuple[str, Decimal | None, Decima
     - ``13%台 113.82 14.80113.821``（税率、单位、金额、税额粘连）
     - ``... 个 1 94.69 94.69 12.3113%``（税额和税率反向粘连）
     """
-    compact = re.sub(r"\s+", " ", line).strip()
+    # A few issuers insert spaces around decimal points in the PDF text stream
+    # (``23. 01`` / ``2. 99``), although the rendered invoice is normal.
+    compact = re.sub(r"(?<=\d)\s*\.\s*(?=\d)", ".", line)
+    compact = re.sub(r"\s+", " ", compact).strip()
+
+    # Wrapped item name/spec on previous lines, with all numeric columns on this line:
+    # ``CM639 件 1 106.74 106.74 13% 13.88``.
+    m = re.search(
+        r"(?P<unit>[\u4e00-\u9fffA-Za-z]{1,4})\s+"
+        r"(?P<quantity>-?\d+(?:\.\d+)?)\s+"
+        r"(?P<unit_price>-?\d+(?:\.\d+)?)\s+"
+        r"(?P<amount>-?\d+\.\d{2})\s+"
+        r"(?P<rate>\d+(?:\.\d+)?)%\s+"
+        r"(?P<tax>-?\d+(?:\.\d+)?)\s*$",
+        compact,
+    )
+    if m:
+        return m.group("unit"), d(m.group("quantity")), d(m.group("amount")), d(m.group("tax"))
 
     m = re.search(
         r"(?P<rate>\d+(?:\.\d+)?)%(?P<unit>[\u4e00-\u9fffA-Za-z]{1,4})\s+"
@@ -363,17 +440,45 @@ def _normalize_name(parts: list[str]) -> str:
     return re.sub(r"\s+", "", "".join(parts)).strip()
 
 
-def _parse_pdf_items(lines: list[str]) -> list[ParsedItem]:
+def _parse_pdf_items(lines: list[str], *, layout: bool = False) -> list[ParsedItem]:
     """从 PDF 文本行里抽物品明细。
 
     每条明细一行首部带 ``*分类*名称``，遇到统计行（合计 / 价税合计 / 收款人...）终止。
+    ``layout=True`` 时保留 pypdf 版面文本的前导空格：首列续行补到商品名，
+    缩进到规格列的续行不会误拼进商品名。
     """
     _SKIP = ("合", "价税合计", "购买时间", "收款人", "复核人", "开票人", "备注",
              "名称:", "统一社会信用", "电子发票", "小         计", "小计", "项目名称")
 
     items: list[ParsedItem] = []
     last: ParsedItem | None = None
+    last_base_name = ""
     pending_name_parts: list[str] = []
+    allow_layout_suffix = False
+
+    def layout_name_part(raw_line: str) -> str:
+        stripped = raw_line.strip()
+        if not layout:
+            return stripped
+        return re.split(r"\s{2,}", stripped, maxsplit=1)[0].strip()
+
+    def append_layout_name_suffix(raw_line: str) -> bool:
+        if not layout or last is None:
+            return False
+        indent = len(raw_line) - len(raw_line.lstrip())
+        if indent > 2:
+            return False  # 规格型号列续行，不属于商品名
+        suffix = layout_name_part(raw_line)
+        if (
+            not suffix
+            or suffix in {"购", "买", "方", "信", "息", "销", "售", "备", "注"}
+            or re.fullmatch(r"[\W_]+|\d+", suffix)
+        ):
+            return False
+        if not last.actual_name.endswith(suffix):
+            last.name += suffix
+            last.actual_name += suffix
+        return True
 
     def make_item(name: str, unit: str, quantity, amount, tax):
         item = ParsedItem(
@@ -385,8 +490,13 @@ def _parse_pdf_items(lines: list[str]) -> list[ParsedItem]:
         )
         return item
 
-    for line in lines:
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line:
+            allow_layout_suffix = False
+            continue
         if any(k in line for k in _SKIP):
+            allow_layout_suffix = False
             continue
         if pending_name_parts:
             loose = _parse_loose_amount_tax_line(line)
@@ -396,13 +506,19 @@ def _parse_pdf_items(lines: list[str]) -> list[ParsedItem]:
                 item = make_item(raw_name, unit, quantity, amount, tax)
                 items.append(item)
                 last = item
+                last_base_name = item.actual_name
                 pending_name_parts = []
+                allow_layout_suffix = False
                 continue
             if not re.search(r"\d+\.\d{2}|\d+%", line):
-                pending_name_parts.append(line)
+                part = layout_name_part(raw_line)
+                if not layout or len(raw_line) - len(raw_line.lstrip()) <= 2:
+                    pending_name_parts.append(part)
                 continue
 
         if not line.startswith("*"):
+            if allow_layout_suffix:
+                allow_layout_suffix = append_layout_name_suffix(raw_line)
             continue
         parsed = _parse_amount_tax_line(line)
         if not parsed:
@@ -410,26 +526,34 @@ def _parse_pdf_items(lines: list[str]) -> list[ParsedItem]:
             if loose:
                 unit, quantity, amount, tax = loose
                 marker = re.search(r"\d+(?:\.\d+)?%[\u4e00-\u9fffA-Za-z]{1,4}\s+-?\d+\.\d{2}", line)
-                raw_name = line[:marker.start()].strip() if marker else line
+                raw_name = layout_name_part(raw_line) if layout else (line[:marker.start()].strip() if marker else line)
                 item = make_item(raw_name, unit, quantity, amount, tax)
                 items.append(item)
                 last = item
+                last_base_name = item.actual_name
+                allow_layout_suffix = False
                 continue
-            pending_name_parts = [line]
+            pending_name_parts = [layout_name_part(raw_line)]
+            allow_layout_suffix = False
             continue
         unit, quantity, amount, tax, name_end = parsed
         # raw_name 从行首到「名称末尾位置」（正则1 给出）截取
-        raw_name = line[:name_end].strip()
+        raw_name = layout_name_part(raw_line) if layout else line[:name_end].strip()
+        base_name = clean_item_name(raw_name)
         if not raw_name and last:
             # 名称没拿到版面给空——把这个修正并入上一条
             last.total = money(last.total + amount + tax)
+            allow_layout_suffix = True
             continue
-        if not unit and last and clean_item_name(raw_name) == last.actual_name:
+        if not unit and last and base_name == last_base_name:
             last.total = money(last.total + amount + tax)
+            allow_layout_suffix = True
             continue
         item = make_item(raw_name, unit, quantity, amount, tax)
         items.append(item)
         last = item
+        last_base_name = base_name
+        allow_layout_suffix = True
 
     return items
 
@@ -437,7 +561,16 @@ def _parse_pdf_items(lines: list[str]) -> list[ParsedItem]:
 def parse_pdf(path: str | Path) -> ParsedInvoice:
     path = Path(path)
     text = _pdf_text(path)
-    return _parse_invoice_text(text, source="pdf")
+    invoice = _parse_invoice_text(text, source="pdf")
+    try:
+        layout_items = _parse_pdf_items(_pdf_layout_text(path).splitlines(), layout=True)
+        layout_total = sum((item.total for item in layout_items), Decimal("0"))
+        if layout_items and money(layout_total - invoice.total) == Decimal("0.00"):
+            invoice.items = layout_items
+    except Exception:
+        # 版面提取只是商品名续行增强；不支持时继续使用普通文本解析结果。
+        pass
+    return invoice
 
 
 def _parse_invoice_text(text: str, source: str = "pdf") -> ParsedInvoice:
@@ -460,7 +593,14 @@ def _parse_invoice_text(text: str, source: str = "pdf") -> ParsedInvoice:
         buyer_name, buyer_tax_id = _extract_pdf_buyer(lines)
         seller_name = _extract_pdf_seller(lines, buyer_tax_id, buyer_name)
 
-    amounts = [d(x) for x in re.findall(r"¥\s*([0-9]+(?:\.[0-9]{2})?)", text)]
+    # Only allow horizontal spacing after the currency sign.  ``\s*`` also crosses a
+    # newline, so a trailing ``¥`` in the tax line could consume a bank/account number
+    # on the next line and turn it into an enormous invoice total.
+    raw_amounts = re.findall(
+        r"[¥￥][^\S\r\n]*(-?[0-9][0-9,，]*(?:[^\S\r\n]*\.[^\S\r\n]*[0-9]{1,2})?)",
+        text,
+    )
+    amounts = [d(re.sub(r"[\s,，]", "", value)) for value in raw_amounts]
     total = max(amounts) if amounts else Decimal("0")
 
     invoice = ParsedInvoice(

@@ -547,6 +547,14 @@ def _scan_file_paths(file_paths: list[Path]) -> dict:
         suffix = entry.suffix.lower()
         if suffix == ".pdf":
             total += 1
+            probe_invoice_nos = set(re.findall(r"(?<!\d)\d{20}(?!\d)", _pdf_probe_text(entry)))
+            if len(probe_invoice_nos) > 1:
+                ignored.append(_file_info(
+                    entry,
+                    "other",
+                    warning=f"这个 PDF 包含 {len(probe_invoice_nos)} 张发票，请选择拆分后的单张发票 PDF",
+                ))
+                continue
             att_type = _pdf_attachment_type(entry)
             if att_type != "invoice_pdf":
                 ignored.append(_file_info(entry, att_type, warning="这类材料请在条目里添加，或拖到界面后选择绑定条目"))
@@ -564,13 +572,28 @@ def _scan_file_paths(file_paths: list[Path]) -> dict:
             continue
 
     used_xml: set[int] = set()
+    seen_pdf_nos: dict[str, str] = {}
+    matched_xml_count = 0
     groups: list[dict] = []
     for idx, pdf in enumerate(pdfs, start=1):
+        pdf_no = pdf.get("invoice_no") or ""
+        if pdf_no and pdf_no in seen_pdf_nos:
+            duplicate_warning = f"与 {seen_pdf_nos[pdf_no]} 的发票号相同，已跳过重复文件"
+            ignored.append({**pdf, "warning": duplicate_warning})
+            duplicate_xml_idx = _match_xml(pdf, xmls, used_xml)
+            if duplicate_xml_idx is not None:
+                used_xml.add(duplicate_xml_idx)
+                ignored.append({**xmls[duplicate_xml_idx], "warning": duplicate_warning})
+            continue
+        if pdf_no:
+            seen_pdf_nos[pdf_no] = pdf["name"]
+
         files = [pdf]
         warnings = [pdf["warning"]] if pdf.get("warning") else []
         xml_idx = _match_xml(pdf, xmls, used_xml)
         if xml_idx is not None:
             used_xml.add(xml_idx)
+            matched_xml_count += 1
             xml = xmls[xml_idx]
             files.append(xml)
             if xml.get("warning"):
@@ -597,8 +620,8 @@ def _scan_file_paths(file_paths: list[Path]) -> dict:
         "ungrouped": ungrouped,
         "ignored": ignored,
         "total_files": total,
-        "invoice_pdf_count": len(pdfs),
-        "matched_xml_count": len(used_xml),
+        "invoice_pdf_count": len(groups),
+        "matched_xml_count": matched_xml_count,
     }
 
 
