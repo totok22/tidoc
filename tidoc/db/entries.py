@@ -15,7 +15,7 @@ from datetime import datetime
 from decimal import Decimal, InvalidOperation
 
 from ..engine.models import ParsedInvoice
-from ..engine.money import money
+from ..engine.money import d, money
 from .database import Database
 
 # 可自由修改的字段（设计文档 8.5）
@@ -28,6 +28,11 @@ STATUS_PARTIAL = "partial"
 STATUS_COMPLETE = "complete"
 VALID_STATUS = (STATUS_DRAFT, STATUS_PARTIAL, STATUS_COMPLETE)
 QUERY_BATCH_SIZE = 900
+PAID_AMOUNT_DIFF_SQL = """
+TRIM(COALESCE(ef.current, '')) <> ''
+AND ROUND(CAST(REPLACE(ef.current, ',', '') AS REAL) * 100)
+    <> ROUND(CAST(COALESCE(NULLIF(REPLACE(e.total, ',', ''), ''), '0') AS REAL) * 100)
+"""
 
 
 def _now() -> str:
@@ -36,6 +41,12 @@ def _now() -> str:
 
 def _row_to_dict(row) -> dict:
     return {k: row[k] for k in row.keys()} if row else {}
+
+
+def paid_amount_differs(total, paid_amount) -> bool:
+    """“已修改”只表示实付金额存在且与发票总金额不一致。"""
+    paid_text = str(paid_amount or "").strip()
+    return bool(paid_text) and money(d(paid_text)) != money(d(total))
 
 
 class EntryRepo:
@@ -176,7 +187,10 @@ class EntryRepo:
         if filters.get("date_to"):
             where.append("e.invoice_date <= ?"); params.append(filters["date_to"])
         if filters.get("modified_only"):
-            where.append("EXISTS (SELECT 1 FROM entry_fields ef WHERE ef.entry_id = e.id AND ef.modified = 1)")
+            where.append(
+                f"EXISTS (SELECT 1 FROM entry_fields ef WHERE ef.entry_id = e.id "
+                f"AND ef.field = 'paid_amount' AND {PAID_AMOUNT_DIFF_SQL})"
+            )
         # 备注维度：有备注 / 无备注（记账备注即 entry_fields.notes 有非空当前值）
         has_notes = filters.get("has_notes")
         if has_notes is True or has_notes == "yes":
@@ -236,8 +250,10 @@ class EntryRepo:
             batch_ids = entry_ids[offset:offset + QUERY_BATCH_SIZE]
             placeholders = ",".join("?" for _ in batch_ids)
             modified_rows = self.db.conn.execute(
-                f"SELECT entry_id, field FROM entry_fields "
-                f"WHERE modified = 1 AND field <> 'notes' AND entry_id IN ({placeholders})",
+                f"SELECT ef.entry_id, ef.field FROM entry_fields ef "
+                f"JOIN entries e ON e.id = ef.entry_id "
+                f"WHERE ef.field = 'paid_amount' AND {PAID_AMOUNT_DIFF_SQL} "
+                f"AND ef.entry_id IN ({placeholders})",
                 batch_ids,
             ).fetchall()
             for row in modified_rows:
@@ -266,7 +282,7 @@ class EntryRepo:
         for r in rows:
             entry = _row_to_dict(r)
             entry["tags"] = json.loads(entry.get("tags") or "[]")
-            # 列表视图带上人工修改标记摘要与附件数，供 UI 显示角标
+            # “已修改”只表示实付金额与发票总金额不一致；字段留痕仍由 modified/history 独立保存。
             entry["modified_fields"] = modified_by_entry[entry["id"]]
             # 按类型统计附件，供 UI 显示「发票/付款/查验」三个完整度状态点
             by_type = attachments_by_entry[entry["id"]]

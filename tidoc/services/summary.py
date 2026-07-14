@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-from ..db.entries import EntryRepo
+from ..db.entries import EntryRepo, paid_amount_differs
 
 SUMMARY_VERSION = 1
 
@@ -45,7 +45,9 @@ def build_entry_summary(entry: dict) -> dict:
         "paid_amount": fields.get("paid_amount", {}).get("current", ""),
         "actual_item_name": fields.get("actual_item_name", {}).get("current", ""),
         "notes": fields.get("notes", {}).get("current", ""),
-        "modified_fields": [f for f, v in fields.items() if v.get("modified") and f != "notes"],
+        "modified_fields": (["paid_amount"] if paid_amount_differs(
+            entry.get("total", ""), fields.get("paid_amount", {}).get("current", "")
+        ) else []),
     }
 
 

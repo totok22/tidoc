@@ -1,6 +1,7 @@
 """PDF 拼接与付款截图转 PDF（设计文档第 9 节）。
 
 - merge_pdfs：把多个 PDF（发票 / 查验单）拼成一份。
+- merge_pdf_groups：按条目连续拼接材料，并按条目标记页码。
 - images_to_pdf：把付款截图（jpg/png）按横版 A4、每页两张拼接。
 - 页面信息标注：只保留份数 / 页码编号，减少遮挡。
 """
@@ -89,9 +90,32 @@ def merge_pdfs(pdf_paths: list[str | Path], out_path: str | Path,
     return out_path
 
 
+def merge_pdf_groups(pdf_groups: list[list[str | Path]], out_path: str | Path,
+                     numbered: bool = True, batch_note: str = "") -> Path:
+    """按组连续拼接 PDF；每组对应一个条目，编号不会被材料类型打断。"""
+    writer = PdfWriter()
+    for group_idx, pdf_paths in enumerate(pdf_groups, start=1):
+        readers = [PdfReader(str(path)) for path in pdf_paths]
+        total_pages = sum(len(reader.pages) for reader in readers)
+        page_idx = 0
+        for reader in readers:
+            for page in reader.pages:
+                page_idx += 1
+                added = writer.add_page(page)
+                if numbered:
+                    box = added.mediabox
+                    label = _footer_text(batch_note, f"No.{group_idx}-{page_idx}/{total_pages}")
+                    overlay = _annotation_overlay(label, (float(box.width), float(box.height)))
+                    added.merge_page(overlay.pages[0])
+    out_path = Path(out_path)
+    with out_path.open("wb") as f:
+        writer.write(f)
+    return out_path
+
+
 def images_to_pdf(image_paths: list[str | Path], out_path: str | Path,
                   annotations: list[str] | None = None,
-                  batch_note: str = "") -> Path:
+                  batch_note: str = "", show_page_footer: bool = True) -> Path:
     """把付款截图按横版 A4、每页两张拼成 PDF。"""
     writer = PdfWriter()
     page_w, page_h = landscape(A4)
@@ -124,8 +148,9 @@ def images_to_pdf(image_paths: list[str | Path], out_path: str | Path,
             if note:
                 _draw_label(c, note, slot_x + slot_w / 2, margin + 3 * mm,
                             font_size=10, align="center")
-        _draw_label(c, _footer_text(batch_note, f"Page {page_index}/{total_pages}"),
-                    page_w - margin, 6 * mm, font_size=10)
+        if show_page_footer:
+            _draw_label(c, _footer_text(batch_note, f"Page {page_index}/{total_pages}"),
+                        page_w - margin, 6 * mm, font_size=10)
         c.save()
         buf.seek(0)
         for page in PdfReader(buf).pages:

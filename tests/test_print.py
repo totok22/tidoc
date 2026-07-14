@@ -120,8 +120,92 @@ def test_full_package_with_real_files(tmp_path):
     results = build_print_package([entry], tmp_path, PrintOptions())
     assert len(results) == 1
     files = results[0].files
-    assert "invoice_pdf" in files and "payment_pdf" in files
-    assert "inspection_pdf" in files and "reimburse_doc" in files and "acceptance_doc" in files
+    assert "entry_bundle_pdf" in files
+    assert "invoice_pdf" not in files and "payment_pdf" not in files and "inspection_pdf" not in files
+    assert "reimburse_doc" in files and "acceptance_doc" in files
     for path in files.values():
         from pathlib import Path
         assert Path(path).exists()
+
+
+def test_separate_material_pdfs_remain_optional(tmp_path):
+    from tidoc_print import PrintEntry, PrintOptions, build_print_package
+    pdf = _sample("*发票.pdf")[0]
+    img = _sample("*付款截图.jpg")[0]
+    insp = _sample("*查验单.pdf")[0]
+    entry = PrintEntry(
+        entry_id="e1", title="北京理工大学", invoice_no="123",
+        invoice_pdfs=[pdf], payment_images=[img], inspection_pdfs=[insp],
+    )
+    options = PrintOptions(
+        make_entry_bundle_pdf=False,
+        make_invoice_pdf=True,
+        make_payment_pdf=True,
+        make_inspection_pdf=True,
+        make_reimburse_doc=False,
+        make_acceptance_doc=False,
+    )
+    files = build_print_package([entry], tmp_path, options)[0].files
+    assert set(files) == {"invoice_pdf", "payment_pdf", "inspection_pdf"}
+
+
+def test_entry_bundle_keeps_each_entry_materials_together(tmp_path):
+    from PIL import Image
+    from pypdf import PdfReader
+    from reportlab.pdfgen import canvas
+    from tidoc_print import PrintEntry, PrintOptions, build_print_package
+
+    def make_pdf(path, text):
+        doc = canvas.Canvas(str(path))
+        doc.drawString(72, 760, text)
+        doc.save()
+        return str(path)
+
+    def make_image(path, color):
+        Image.new("RGB", (320, 640), color).save(path)
+        return str(path)
+
+    entries = [
+        PrintEntry(
+            entry_id="a", title="北京理工大学",
+            invoice_pdfs=[make_pdf(tmp_path / "invoice-a.pdf", "INVOICE-A")],
+            payment_images=[make_image(tmp_path / "pay-a-1.png", "red"),
+                            make_image(tmp_path / "pay-a-2.png", "blue")],
+            inspection_pdfs=[make_pdf(tmp_path / "inspection-a.pdf", "INSPECTION-A")],
+        ),
+        PrintEntry(
+            entry_id="b", title="北京理工大学",
+            invoice_pdfs=[make_pdf(tmp_path / "invoice-b.pdf", "INVOICE-B")],
+            payment_images=[make_image(tmp_path / "pay-b.png", "green")],
+            inspection_pdfs=[make_pdf(tmp_path / "inspection-b.pdf", "INSPECTION-B")],
+        ),
+    ]
+    options = PrintOptions(make_reimburse_doc=False, make_acceptance_doc=False)
+    result = build_print_package(entries, tmp_path / "out", options)[0]
+    pages = PdfReader(result.files["entry_bundle_pdf"]).pages
+    texts = [page.extract_text() or "" for page in pages]
+
+    assert len(pages) == 6
+    assert "INVOICE-A" in texts[0] and "No.1-1/3" in texts[0]
+    assert "No.1-2/3" in texts[1]
+    assert "INSPECTION-A" in texts[2] and "No.1-3/3" in texts[2]
+    assert "INVOICE-B" in texts[3] and "No.2-1/3" in texts[3]
+    assert "No.2-2/3" in texts[4]
+    assert "INSPECTION-B" in texts[5] and "No.2-3/3" in texts[5]
+
+
+def test_entry_bundle_can_disable_overlay(tmp_path):
+    from pypdf import PdfReader
+    from reportlab.pdfgen import canvas
+    from tidoc_print import PrintEntry, PrintOptions, build_print_package
+
+    invoice = tmp_path / "invoice.pdf"
+    doc = canvas.Canvas(str(invoice))
+    doc.drawString(72, 760, "INVOICE")
+    doc.save()
+    entry = PrintEntry(entry_id="e1", title="北京理工大学", invoice_pdfs=[str(invoice)])
+    options = PrintOptions(annotate=False, batch_note="批次甲", make_reimburse_doc=False, make_acceptance_doc=False)
+    result = build_print_package([entry], tmp_path / "out", options)[0]
+    text = PdfReader(result.files["entry_bundle_pdf"]).pages[0].extract_text() or ""
+    assert "INVOICE" in text
+    assert "No." not in text and "批次甲" not in text

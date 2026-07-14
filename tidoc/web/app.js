@@ -22,6 +22,7 @@ const State = {
   multiClaimantMode: false,
   activeDetailEntryId: null,
   updateStatus: null,
+  recentImportedEntryIds: [],
 };
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -39,6 +40,27 @@ function toast(msg, kind) {
   const t = el('div', 'toast' + (kind ? ' ' + kind : ''), esc(msg));
   $('#toastRoot').appendChild(t);
   setTimeout(() => { t.style.opacity = '0'; t.style.transition = 'opacity .25s'; setTimeout(() => t.remove(), 280); }, 2600);
+}
+
+function taskProgress(message) {
+  const node = el('div', 'toast working', `
+    <span class="task-spinner" aria-hidden="true"></span>
+    <span data-task-progress>${esc(message)}</span>`);
+  node.setAttribute('role', 'status');
+  $('#toastRoot').appendChild(node);
+  let closed = false;
+  return {
+    update(next) {
+      if (closed) return;
+      const text = node.querySelector('[data-task-progress]');
+      if (text) text.textContent = next;
+    },
+    close() {
+      if (closed) return;
+      closed = true;
+      node.remove();
+    },
+  };
 }
 
 const TITLE_CLASS = { '北京理工大学': 'univ', '北京理工大学教育基金会': 'found' };
@@ -167,8 +189,16 @@ function setupFastTooltips() {
     tooltip.classList.remove('visible');
   };
   const show = (target) => {
-    const text = target?.dataset.tooltip;
-    if (!text) return;
+    const overflowText = target?.dataset.tooltipOverflow;
+    if (overflowText && target.scrollWidth <= target.clientWidth && target.scrollHeight <= target.clientHeight) {
+      hide();
+      return;
+    }
+    const text = target?.dataset.tooltip || overflowText;
+    if (!text) {
+      hide();
+      return;
+    }
     active = target;
     tooltip.textContent = text;
     tooltip.classList.add('visible');
@@ -180,15 +210,16 @@ function setupFastTooltips() {
     tooltip.style.left = `${left}px`;
     tooltip.style.top = `${top}px`;
   };
+  const tooltipTarget = (node) => node?.closest?.('[data-tooltip], [data-tooltip-overflow]');
   document.addEventListener('pointerover', (ev) => {
-    const target = ev.target.closest?.('[data-tooltip]');
+    const target = tooltipTarget(ev.target);
     if (target && target !== active) show(target);
   });
   document.addEventListener('pointerout', (ev) => {
-    const next = ev.relatedTarget?.closest?.('[data-tooltip]');
+    const next = tooltipTarget(ev.relatedTarget);
     if (next !== active) next ? show(next) : hide();
   });
-  document.addEventListener('focusin', (ev) => show(ev.target.closest?.('[data-tooltip]')));
+  document.addEventListener('focusin', (ev) => show(tooltipTarget(ev.target)));
   document.addEventListener('focusout', hide);
   document.addEventListener('scroll', hide, true);
   window.addEventListener('blur', hide);
@@ -244,28 +275,36 @@ function openReleaseHighlights(mode, data) {
     if (data.seen_key) Api.setAppPreference(data.seen_key, '1').catch(() => {});
   };
   const body = el('div', 'release-highlights');
+  const previousVersion = available ? data.current_version : data.previous_version;
+  const versionLine = previousVersion
+    ? `<span>v${esc(previousVersion)}</span><i aria-hidden="true">→</i><strong>v${esc(version || '')}</strong>`
+    : `<strong>v${esc(version || '')}</strong>`;
   body.innerHTML = `
-    <div class="release-heading">
-      <span class="release-version">v${esc(version || '')}</span>
-      <div><b>${available ? '新版本可用' : '已更新'}</b></div>
+    <div class="release-version-line">
+      <span class="release-version-label">${available ? '可更新版本' : '已更新版本'}</span>
+      <div>${versionLine}</div>
     </div>
     <div class="release-change-list">
       <b>本次更新</b>
       ${notes.length
         ? `<ul>${notes.slice(0, 6).map((note) => `<li>${esc(note)}</li>`).join('')}</ul>`
-        : ''}
-    </div>`;
+        : '<p>此版本没有附加更新说明。</p>'}
+    </div>
+    <details class="release-guide">
+      <summary><span><b>使用指南</b><small>从导入发票到整理、打印的完整流程</small></span><em>6 步</em></summary>
+      <div class="guide-steps">${usageGuideStepsMarkup()}</div>
+    </details>`;
   let m;
   const close = () => { seen(); m.close(); };
   const footer = available
     ? [
         mkBtn('稍后', 'ghost', close),
-        mkBtn('查看更新', 'primary', () => { seen(); m.close(); openUpdateDialog(); }),
+        mkBtn('前往更新', 'primary', () => { seen(); m.close(); openUpdateDialog(); }),
       ]
     : [mkBtn('继续使用', 'primary', close)];
   m = modal({
     title: available ? '发现新版本' : '更新完成',
-    body,
+    body, wide: true,
     footer,
     onClose: seen,
   });
@@ -470,7 +509,7 @@ function updateListSummary() {
     sum += Number(entry.total) || 0;
     const paid = Number(entry.fields?.paid_amount?.current);
     paidSum += isNaN(paid) ? 0 : paid;
-    if (entry.modified_fields?.length) modifiedCount++;
+    if (entryHasPaidDifference(entry)) modifiedCount++;
   });
   $('#stats').innerHTML = State.entries.length
     ? `<span><b>${State.entries.length}</b> 条</span>
@@ -490,9 +529,7 @@ function listEntryFromDetail(entry) {
   return {
     ...entry,
     fields,
-    modified_fields: Object.entries(fields)
-      .filter(([field, value]) => field !== 'notes' && value?.modified)
-      .map(([field]) => field),
+    modified_fields: entryHasPaidDifference(entry) ? ['paid_amount'] : [],
     attachment_count: Object.values(attachmentTypes).reduce((sum, count) => sum + count, 0),
     attachment_types: attachmentTypes,
     has_invoice: !!(attachmentTypes.invoice_pdf || attachmentTypes.invoice_xml),
@@ -510,6 +547,11 @@ async function refreshEntryCard(entryId, currentDetail = null) {
   State.entries[index] = entry;
 
   if (State.quickView === 'incomplete' && (entry.completeness?.status || entry.status) === 'complete') {
+    State.entries.splice(index, 1);
+    renderEntries();
+    return;
+  }
+  if (State.quickView === 'modified' && !entryHasPaidDifference(entry)) {
     State.entries.splice(index, 1);
     renderEntries();
     return;
@@ -557,7 +599,6 @@ function entryCard(e) {
   card.setAttribute('aria-keyshortcuts', 'Enter Space ArrowUp ArrowDown Home End');
 
   const check = el('div', 'entry-check');
-  check.title = '切换选中';
   check.onclick = (ev) => { ev.stopPropagation(); if (ev.detail > 1) return; toggleSelect(e.id, ev.shiftKey); };
   check.ondblclick = (ev) => { ev.preventDefault(); ev.stopPropagation(); };
   const cb = el('input');
@@ -571,8 +612,6 @@ function entryCard(e) {
   stripe.onclick = (ev) => { ev.stopPropagation(); if (ev.detail > 1) return; toggleSelect(e.id, ev.shiftKey); };
   stripe.ondblclick = (ev) => { ev.preventDefault(); ev.stopPropagation(); };
 
-  const modified = (e.modified_fields && e.modified_fields.length)
-    ? `<span class="badge modified">${iconPencil(11)}已改 ${e.modified_fields.length}</span>` : '';
   // 校验状态：仅在 warning/blocked 时突出显示（pass 不占视觉）
   const checkBadge = (e.check_status && e.check_status !== 'pass')
     ? `<span class="badge ${e.check_status}" title="${esc(e.check_message || '')}">${CHECK_LABEL[e.check_status] || ''}</span>` : '';
@@ -581,9 +620,12 @@ function entryCard(e) {
   const notesCur = fields.notes ? fields.notes.current : '';
   const actualCur = fields.actual_item_name ? fields.actual_item_name.current : '';
   const paidCur = fields.paid_amount ? fields.paid_amount.current : '';
+  const paidDiff = entryHasPaidDifference(e);
+  const modified = paidDiff
+    ? `<span class="badge modified">${iconPencil(11)}已修改</span>` : '';
   const owner = State.profileById[e.profile_id];
   const ownerBadge = (State.multiClaimantMode || State.profiles.length > 1) && owner
-    ? `<span class="badge person" title="报账人：${esc(owner.name)} · 审核人：${esc(owner.reviewer)}">${esc(owner.name)}</span>` : '';
+    ? `<span class="badge person"${owner.reviewer ? ` title="审核人：${esc(owner.reviewer)}"` : ''}>${esc(owner.name)}</span>` : '';
 
   // 完整度：基于后端派生的 completeness（状态自动推导），缺项做 tooltip
   const comp = e.completeness || { ready: false, status: e.status, missing: [] };
@@ -594,9 +636,8 @@ function entryCard(e) {
 
   const itemTitle = actualCur || (e.items && e.items[0] && (e.items[0].actual_name || e.items[0].name)) || '未填物资名称';
   const notesPreview = notesCur
-    ? `<span class="notes-preview important" title="${esc(notesCur)}">${iconNote(12)}${esc(notesCur)}</span>`
+    ? `<span class="notes-preview important" data-tooltip-overflow="${esc(notesCur)}">${iconNote(12)}${esc(notesCur)}</span>`
     : '';
-  const paidDiff = paidCur && !sameMoney(paidCur, e.total);
   const actionBtn = (action, label, on, title) => (
     `<button class="${on ? 'done' : ''}" data-card-action="${action}" title="${esc(title)}">` +
     `<span class="action-state"></span>${label}</button>`
@@ -604,14 +645,14 @@ function entryCard(e) {
 
   const main = el('div', 'entry-main', `
     <div class="entry-line1">
-      <span class="entry-item-title" title="${esc(itemTitle)}">${esc(itemTitle)}</span>
+      <span class="entry-item-title" data-tooltip-overflow="${esc(itemTitle)}">${esc(itemTitle)}</span>
       ${ownerBadge}
       ${compBadge}
       ${checkBadge}
       ${modified}
     </div>
     <div class="entry-line2">
-      <span class="seller-muted" title="${esc(e.seller || '')}">${esc(e.seller || '未识别销售方')}</span>
+      <span class="seller-muted" data-tooltip-overflow="${esc(e.seller || '')}">${esc(e.seller || '未识别销售方')}</span>
       <span class="mono">${esc(e.invoice_no || '无发票号')}</span>
     </div>
     <div class="entry-line3">
@@ -625,13 +666,13 @@ function entryCard(e) {
   }
   const batchNote = State.currentBatch?.entry_notes?.[e.id];
   if (batchNote) {
-    main.insertAdjacentHTML('beforeend', `<div class="batch-entry-note" title="${esc(batchNote)}">${iconNote(12)}${esc(batchNote)}</div>`);
+    main.insertAdjacentHTML('beforeend', `<div class="batch-entry-note" data-tooltip-overflow="${esc(batchNote)}">${iconNote(12)}${esc(batchNote)}</div>`);
   }
 
   const right = el('div', 'entry-right');
   right.innerHTML = `
     <div class="entry-total">${fmtMoney(e.total)}</div>
-    ${paidDiff ? `<div class="entry-paid diff" title="实付金额与发票金额不同">实付 <b>${fmtMoney(paidCur)}</b><span>差异</span></div>` : ''}
+    ${paidDiff ? `<div class="entry-paid diff">实付 <b>${fmtMoney(paidCur)}</b><span>差异</span></div>` : ''}
     <button class="entry-detail-action" data-card-action="detail">打开详情</button>
     <div class="entry-inline-actions">
       ${actionBtn('invoice', '发票', e.has_invoice, e.has_invoice ? '已添加发票材料；点击补充发票 PDF' : '添加发票 PDF')}
@@ -681,13 +722,16 @@ function entryCard(e) {
     ev.preventDefault();
     ev.stopPropagation();
     card.classList.remove('card-dragging');
+    const progress = taskProgress('正在读取拖入材料…');
     try {
-      const added = await addDroppedMaterialFiles(e.id, [...(ev.dataTransfer?.files || [])]);
+      const added = await addDroppedMaterialFiles(e.id, [...(ev.dataTransfer?.files || [])], progress);
       if (added) {
+        progress.update('正在刷新条目状态…');
         await refreshEntries();
         toast('材料已添加', 'ok');
       }
     } catch (err) { toast(err.message, 'err'); }
+    finally { progress.close(); }
   };
   return card;
 }
@@ -772,6 +816,11 @@ function sameMoney(a, b) {
   const y = Number(b);
   if (!isFinite(x) || !isFinite(y)) return String(a || '') === String(b || '');
   return Math.round(x * 100) === Math.round(y * 100);
+}
+
+function entryHasPaidDifference(entry) {
+  const paid = entry?.fields?.paid_amount?.current;
+  return !!String(paid ?? '').trim() && !sameMoney(paid, entry?.total);
 }
 
 // 按报账人 / 抬头分组渲染，每组头显示条数、合计、齐备率，可整组选中
@@ -957,7 +1006,7 @@ function renderBatchFolders() {
       ${folders.map((b) => {
         const st = b.stats || {};
         return `<span class="batch-folder${State.batchFilter === b.id ? ' active' : ''}" data-folder="${esc(b.id)}">
-          <button class="folder-open" title="${esc(b.name)}"><span>${esc(b.name)}</span><small>${st.count || 0} 条${st.incomplete ? ` · <span class="miss">缺 ${st.incomplete}</span>` : ' · 齐'}</small></button>
+          <button class="folder-open"><span data-tooltip-overflow="${esc(b.name)}">${esc(b.name)}</span><small>${st.count || 0} 条${st.incomplete ? ` · <span class="miss">缺 ${st.incomplete}</span>` : ' · 齐'}</small></button>
           <button class="folder-menu" data-folder-menu="${esc(b.id)}" title="批次操作">⋯</button>
         </span>`;
       }).join('')}
@@ -1284,12 +1333,17 @@ async function quickPaidFlow(e) {
 }
 
 async function quickAddAttachment(entryId, type) {
+  let progress = null;
   try {
     const res = await Api.pickFiles(type === 'payment_screenshot');
     const paths = res.paths || [];
     if (!paths.length) return;
+    progress = taskProgress(type === 'payment_screenshot'
+      ? '正在识别付款截图金额…'
+      : '正在校验并添加材料…');
     if (type === 'payment_screenshot') {
       const infos = (await materialInfosForPaths(paths)).map((info) => ({ ...info, type }));
+      progress.update('正在添加截图并处理实付金额…');
       const result = await addMaterialInfosToEntry(entryId, infos);
       await syncEntryAfterChange(entryId, { affectsStatus: true });
       toast(result.message || '材料已添加', 'ok');
@@ -1299,6 +1353,7 @@ async function quickAddAttachment(entryId, type) {
       toast('材料已添加', 'ok');
     }
   } catch (err) { toast(err.message, 'err'); }
+  finally { progress?.close(); }
 }
 
 async function maybeSetPaidFromInvoice(entryId) {
@@ -1838,7 +1893,7 @@ async function openSettings() {
       <div class="settings-block">
         <div class="settings-block-title">数据位置</div>
         <div class="settings-datapath">
-          <code title="${esc(paths.root)}">${esc(paths.root)}</code>
+          <code data-tooltip-overflow="${esc(paths.root)}">${esc(paths.root)}</code>
           <span class="settings-datapath-tag">${paths.is_default ? '系统默认位置' : '自定义位置'}</span>
         </div>
         <div class="settings-row-actions">
@@ -2170,15 +2225,18 @@ async function maybeShowFirstUseGuide() {
   }, 450);
 }
 
+function usageGuideStepsMarkup() {
+  return `<div><b>1 · 导入发票</b><span>把发票 PDF 或 XML 拖入、粘贴到主界面；文件较多时用“导入发票”选择多个文件或整个文件夹。</span></div>
+    <div><b>2 · 补齐材料</b><span>付款截图、查验单可直接拖到条目卡片或详情材料区；混合导入时，能按发票号唯一匹配的查验单会自动归入条目。</span></div>
+    <div><b>3 · 核对修正</b><span>用“待补材料”“识别提醒”“严重问题”筛出待处理条目，在详情中核对实付金额、明细和备注。</span></div>
+    <div><b>4 · 组织批次</b><span>勾选条目后装入报账批次、打标签或批量处理；按住 Shift 可连续选择，右键单条可快速移动或补材料。</span></div>
+    <div><b>5 · 导出打印</b><span>打印默认按每个条目的发票、付款截图、查验单依次拼接；也可选择按材料类型分别导出，并按需关闭页码编号。</span></div>
+    <div><b>6 · 后续查找</b><span>可按报账人、抬头、批次、状态、日期、金额或关键词筛选；打印导出组件与软件更新在“设置 → 软件更新”管理。</span></div>`;
+}
+
 function openUsageGuide(firstRun) {
   const body = el('div', 'guide-steps');
-  body.innerHTML = `
-    <div><b>导入发票</b><span>拖入、粘贴或选择发票 PDF；XML 可一并导入，帮助识别。多张发票可用“导入发票”按文件夹或多选处理。</span></div>
-    <div><b>补齐材料</b><span>付款截图、查验单直接拖到条目卡片或详情材料区。混合粘贴时，能按发票号匹配的查验单会自动归入条目。</span></div>
-    <div><b>核对条目</b><span>“待补材料”“识别提醒”“严重问题”可快速筛出需要处理的条目；实付金额和备注在详情中补充。</span></div>
-    <div><b>批量处理</b><span>勾选条目后可导出、打印、打标签或装入报账批次。按住 Shift 可连续选择；批次可留催办备注。</span></div>
-    <div><b>常用操作</b><span>点击卡片右侧“详情”或右键条目打开详情和更多操作。空白列表区可拖入发票，条目卡片用于绑定材料。</span></div>
-    <div><b>打印导出</b><span>导出总览、附件包或打印材料前先勾选条目；打印导出组件可在“设置 → 软件更新”安装或更新。</span></div>`;
+  body.innerHTML = usageGuideStepsMarkup();
   let m;
   const close = () => {
     if (firstRun) {
@@ -2265,6 +2323,7 @@ function openNewEntry() {
 
   async function preview() {
     if (!picked.xml && !picked.pdf) return;
+    const progress = taskProgress('正在识别发票信息…');
     try {
       const r = await Api.parseFiles(picked.xml, picked.pdf);
       const p = r.parsed, c = r.check;
@@ -2285,9 +2344,11 @@ function openNewEntry() {
       const titleSel = body.querySelector('#neTitle');
       if (!titleSel.value && p.buyer_name) titleSel.value = p.buyer_name;
     } catch (e) { toast('识别失败：' + e.message, 'err'); }
+    finally { progress.close(); }
   }
 
   const create = async () => {
+    const progress = taskProgress('正在保存条目并识别材料…');
     try {
       await Api.createEntry({
         profileId: selectedClaimantId(body),
@@ -2300,6 +2361,7 @@ function openNewEntry() {
       await refreshEntries();
       toast('已保存', 'ok');
     } catch (e) { toast(e.message, 'err'); }
+    finally { progress.close(); }
   };
 
   const m = modal({
@@ -2342,10 +2404,12 @@ async function openBatchImportFromFolder() {
   try { picked = await Api.pickFolder(); } catch (e) { toast(e.message, 'err'); return; }
   const folder = picked && picked.path;
   if (!folder) return;
+  const progress = taskProgress('正在扫描文件夹中的发票和 XML…');
   try {
     const scan = await Api.scanFolder(folder);
     openBatchImportPreview(scan, folder);
   } catch (e) { toast('扫描失败：' + e.message, 'err'); }
+  finally { progress.close(); }
 }
 
 async function openBatchImportFromFiles() {
@@ -2353,10 +2417,12 @@ async function openBatchImportFromFiles() {
   try { picked = await Api.pickFiles(true); } catch (e) { toast(e.message, 'err'); return; }
   const paths = (picked && picked.paths) || [];
   if (!paths.length) return;
+  const progress = taskProgress(`正在扫描 ${paths.length} 个发票文件…`);
   try {
     const scan = await Api.scanFiles(paths);
     openBatchImportPreview(scan, `${paths.length} 个文件`);
   } catch (e) { toast('扫描失败：' + e.message, 'err'); }
+  finally { progress.close(); }
 }
 
 function openBatchImportPreview(scan, sourceLabel, options = {}) {
@@ -2383,7 +2449,7 @@ function openBatchImportPreview(scan, sourceLabel, options = {}) {
         ${g.files.map((f) => `
           <div class="bi-file">
             <span class="attach-type">${esc(f.type_label || attachTypeLabel(f.type))}</span>
-            <span class="bi-name" title="${esc(f.name)}">${esc(f.name)}</span>
+            <span class="bi-name" data-tooltip-overflow="${esc(f.name)}">${esc(f.name)}</span>
             ${f.warning ? `<span class="bi-warning">${esc(f.warning)}</span>` : ''}
           </div>`).join('')}
         ${(g.warnings || []).length ? `<div class="bi-warning">${g.warnings.map(esc).join('；')}</div>` : ''}
@@ -2396,7 +2462,7 @@ function openBatchImportPreview(scan, sourceLabel, options = {}) {
         <div class="bi-muted-list">${ungrouped.map((f) => `
           <div class="bi-file">
             <span class="attach-type">${esc(f.type_label || 'XML')}</span>
-            <span class="bi-name" title="${esc(f.name)}">${esc(f.name)}</span>
+            <span class="bi-name" data-tooltip-overflow="${esc(f.name)}">${esc(f.name)}</span>
             <span class="bi-warning">${esc(f.warning || '')}</span>
           </div>`).join('')}</div>
       </div>` : '';
@@ -2408,7 +2474,7 @@ function openBatchImportPreview(scan, sourceLabel, options = {}) {
         <div class="bi-muted-list">${pendingMaterialInfos.map((f) => `
           <div class="bi-file">
             <span class="attach-type">${esc(f.type_label || attachTypeLabel(f.type))}</span>
-            <span class="bi-name" title="${esc(f.name)}">${esc(f.name)}</span>
+            <span class="bi-name" data-tooltip-overflow="${esc(f.name)}">${esc(f.name)}</span>
             ${f.invoice_no ? `<span class="bi-warning">发票号 ${esc(f.invoice_no)}</span>` : ''}
             ${f.warning ? `<span class="bi-warning">${esc(f.warning)}</span>` : ''}
           </div>`).join('')}</div>
@@ -2421,7 +2487,7 @@ function openBatchImportPreview(scan, sourceLabel, options = {}) {
         <div class="bi-muted-list">${ignored.map((f) => `
           <div class="bi-file">
             <span class="attach-type">${esc(f.type_label || '跳过')}</span>
-            <span class="bi-name" title="${esc(f.name)}">${esc(f.name)}</span>
+            <span class="bi-name" data-tooltip-overflow="${esc(f.name)}">${esc(f.name)}</span>
             <span class="bi-warning">${esc(f.warning || '')}</span>
           </div>`).join('')}</div>
       </div>` : '';
@@ -2469,8 +2535,11 @@ function openBatchImportPreview(scan, sourceLabel, options = {}) {
           .filter((g) => g.selected)
           .map((g) => ({ key: g.key, label: g.label, files: g.files.map((f) => ({ path: f.path, type: f.type })) }));
         if (!payload.length) { toast('没有可创建的分组', 'err'); return; }
+        const progress = taskProgress(`正在创建 ${payload.length} 个报账条目…`);
         try {
           const r = await Api.batchCreateEntries(selectedClaimantId(body), payload);
+          State.recentImportedEntryIds = r.entry_ids || [];
+          if (pendingMaterialInfos.length) progress.update('正在识别并匹配随附材料…');
           const bind = pendingMaterialInfos.length
             ? await autoBindMaterialInfos(pendingMaterialInfos, r.created_entries || [])
             : { manual: [] };
@@ -2488,6 +2557,7 @@ function openBatchImportPreview(scan, sourceLabel, options = {}) {
             toast(`已创建 ${r.created} 条`, 'ok');
           }
         } catch (e) { toast(e.message, 'err'); }
+        finally { progress.close(); }
       }),
     ],
   });
@@ -2543,7 +2613,7 @@ async function openEntryDetail(entryId, currentDetail = null) {
         </div>
       </div>`).join('');
     return `
-      <div class="att-group${has ? ' has' : ' missing'}">
+      <div class="att-group${has ? ' has' : ' missing'}" data-att-group="${types[0]}" data-att-hint="${esc(hint)}">
         <div class="att-group-head">
           <span class="att-group-dot"></span>
           <span class="att-group-title">${label}</span>
@@ -2570,22 +2640,26 @@ async function openEntryDetail(entryId, currentDetail = null) {
     || '<div class="attach-item" style="color:var(--ink-soft)">暂无修改记录</div>';
 
   const comp = e.completeness || { ready: false, missing: [] };
-  const flowStep = (on, label, sub) => `
-    <div class="flow-step${on ? ' on' : ''}">
+  const flowStep = (key, on, label, sub) => `
+    <div class="flow-step${on ? ' on' : ''}" data-flow-step="${key}">
       <span class="flow-dot"></span>
       <b>${label}</b>
       <small>${sub}</small>
     </div>`;
   const materialFlow = `
     <div class="flow-strip">
-      ${flowStep(e.has_invoice, '发票', e.has_invoice ? '已导入' : '需要 PDF')}
-      ${flowStep(e.has_payment, '付款', e.has_payment ? '已上传' : '后续补截图')}
-      ${flowStep(e.has_inspection, '查验', e.has_inspection ? '已上传' : '后续补查验单')}
-      ${flowStep(!!((f.paid_amount || {}).current), '实付', (f.paid_amount || {}).current ? fmtMoney((f.paid_amount || {}).current) : '待确认')}
+      ${flowStep('invoice', e.has_invoice, '发票', e.has_invoice ? '已导入' : '需要 PDF')}
+      ${flowStep('payment', e.has_payment, '付款', e.has_payment ? '已上传' : '后续补截图')}
+      ${flowStep('inspection', e.has_inspection, '查验', e.has_inspection ? '已上传' : '后续补查验单')}
+      ${flowStep('paid', !!((f.paid_amount || {}).current), '实付', (f.paid_amount || {}).current ? fmtMoney((f.paid_amount || {}).current) : '待确认')}
     </div>`;
-  const compLine = comp.ready
-    ? `<p class="hint ok-hint" style="margin-top:10px">材料齐全、实付已填、校验通过。</p>`
-    : (comp.missing.length ? `<p class="hint" style="margin-top:10px">待补：${comp.missing.map(esc).join('、')}。</p>` : '');
+  const completenessLine = (detail) => {
+    const state = detail.completeness || { ready: false, missing: [] };
+    return state.ready
+      ? `<p class="hint ok-hint" style="margin-top:10px">材料齐全、实付已填、校验通过。</p>`
+      : (state.missing?.length ? `<p class="hint" style="margin-top:10px">待补：${state.missing.map(esc).join('、')}。</p>` : '');
+  };
+  const compLine = completenessLine(e);
 
   body.innerHTML = `
     ${materialFlow}
@@ -2611,7 +2685,7 @@ async function openEntryDetail(entryId, currentDetail = null) {
           ${editRow('实际物资名称', 'actual_item_name', f.actual_item_name)}
         </div>
         ${editRow('条目备注', 'notes', f.notes, true)}
-        ${compLine}
+        <div data-detail-completeness>${compLine}</div>
       </div>
     </div>
 
@@ -2637,6 +2711,25 @@ async function openEntryDetail(entryId, currentDetail = null) {
       <summary>修改记录</summary>
       <div class="history-list">${history}</div>
     </details>`;
+
+  const updateDetailMaterialState = (detail) => {
+    const paid = detail.fields?.paid_amount?.current || '';
+    const states = {
+      invoice: [detail.has_invoice, detail.has_invoice ? '已导入' : '需要 PDF'],
+      payment: [detail.has_payment, detail.has_payment ? '已上传' : '后续补截图'],
+      inspection: [detail.has_inspection, detail.has_inspection ? '已上传' : '后续补查验单'],
+      paid: [!!paid, paid ? fmtMoney(paid) : '待确认'],
+    };
+    Object.entries(states).forEach(([key, [on, sub]]) => {
+      const step = body.querySelector(`[data-flow-step="${key}"]`);
+      if (!step) return;
+      step.classList.toggle('on', !!on);
+      const small = step.querySelector('small');
+      if (small) small.textContent = sub;
+    });
+    const completeness = body.querySelector('[data-detail-completeness]');
+    if (completeness) completeness.innerHTML = completenessLine(detail);
+  };
 
   function lockedKV(label, field, val, mono, money) {
     const display = money ? fmtMoney(val) : esc(val || '\u2014');
@@ -2782,8 +2875,14 @@ async function openEntryDetail(entryId, currentDetail = null) {
     btn.onclick = async () => {
       try {
         await Api.deleteItem(parseInt(btn.dataset.delItem, 10));
+        const row = btn.closest('tr');
+        const tbody = row?.parentElement;
+        row?.remove();
+        if (tbody && !tbody.querySelector('tr[data-item-id]')) {
+          tbody.innerHTML = '<tr><td colspan="6" style="color:var(--ink-soft)">无明细</td></tr>';
+        }
+        await syncEntryAfterChange(entryId, { searchable: true });
         toast('已删除', 'ok');
-        await reopenEntryDetail(mm, entryId, { searchable: true });
       } catch (err) { toast(err.message, 'err'); }
     };
   });
@@ -2845,7 +2944,26 @@ async function openEntryDetail(entryId, currentDetail = null) {
   });
   body.querySelectorAll('[data-del-att]').forEach((b) => {
     b.onclick = async () => {
-      try { await Api.deleteAttachment(b.dataset.delAtt); toast('已删除', 'ok'); await reopenEntryDetail(mm, entryId, { affectsStatus: true }); }
+      try {
+        await Api.deleteAttachment(b.dataset.delAtt);
+        const group = b.closest('.att-group');
+        b.closest('.attach-item')?.remove();
+        if (group) {
+          const count = group.querySelectorAll('.attach-item').length;
+          const status = group.querySelector('.att-group-status');
+          if (status) status.textContent = count ? `已上传 ${count}` : '未上传';
+          if (!count) {
+            group.classList.remove('has');
+            group.classList.add('missing');
+            group.querySelector('.attach-list')?.remove();
+            group.appendChild(el('div', 'att-group-hint', esc(group.dataset.attHint || '')));
+          }
+        }
+        const detail = await Api.getEntry(entryId);
+        await syncEntryAfterChange(entryId, { affectsStatus: true }, detail);
+        updateDetailMaterialState(detail);
+        toast('已删除', 'ok');
+      }
       catch (err) { toast(err.message, 'err'); }
     };
   });
@@ -2905,11 +3023,14 @@ async function materialInfosForPaths(paths) {
   }));
 }
 
-async function addDroppedMaterialFiles(entryId, files) {
+async function addDroppedMaterialFiles(entryId, files, progress = null) {
   if (!files.length) return false;
+  progress?.update('正在读取拖入材料…');
   const paths = await droppedFilesToPaths(files);
   try {
+    progress?.update('正在识别文件类型和付款金额…');
     const infos = await materialInfosForPaths(paths);
+    progress?.update('正在校验并添加到当前条目…');
     await addMaterialInfosToEntry(entryId, infos);
   } finally {
     await cleanupDroppedPaths(paths);
@@ -2965,25 +3086,14 @@ async function validateDroppedMaterialsForEntry(entryId, infos) {
 }
 
 async function autoBindMaterialInfos(infos, extraEntries = []) {
-  const existing = await Api.listEntries({});
-  const byId = new Map();
-  for (const entry of [...(extraEntries || []), ...existing]) {
-    const id = entry.entry_id || entry.id;
-    if (id) byId.set(id, entry);
-  }
-  const allEntries = [...byId.values()];
+  const candidates = (extraEntries || []).map((entry) => entry.entry_id || entry.id || entry).filter(Boolean);
+  const planned = await Api.suggestMaterialBindings(infos, candidates);
   const auto = [];
   const manual = [];
 
-  for (const info of infos) {
-    if (info.type === 'inspection_pdf' && info.invoice_no) {
-      const matches = allEntries.filter((entry) => entry.invoice_no === info.invoice_no);
-      if (matches.length === 1) {
-        auto.push({ info, entryId: matches[0].entry_id || matches[0].id });
-        continue;
-      }
-    }
-    manual.push(info);
+  for (const info of planned) {
+    if (info.suggested_entry_id) auto.push({ info, entryId: info.suggested_entry_id });
+    else manual.push(info);
   }
 
   for (const item of auto) {
@@ -2995,12 +3105,12 @@ async function autoBindMaterialInfos(infos, extraEntries = []) {
 
 async function handleLooseMaterialInfos(infos, cleanupPaths) {
   if (!infos.length) return false;
-  const bind = await autoBindMaterialInfos(infos);
+  const bind = await autoBindMaterialInfos(infos, State.recentImportedEntryIds);
   const manualPaths = new Set(bind.manual.map((info) => info.path));
   await cleanupDroppedPaths((cleanupPaths || infos.map((info) => info.path)).filter((p) => !manualPaths.has(p)));
   if (bind.auto.length) {
     await refreshEntries();
-    toast(`已自动绑定 ${bind.auto.length} 份查验单`, 'ok');
+    toast(`已自动绑定 ${bind.auto.length} 份材料`, 'ok');
   }
   return true;
 }
@@ -3045,10 +3155,13 @@ function setupMaterialDrop(zone, entryId, onDone) {
     ev.stopPropagation();
     zone.classList.remove('dragging');
     const files = [...(ev.dataTransfer?.files || [])];
+    const progress = taskProgress('正在读取拖入材料…');
     try {
-      const added = await addDroppedMaterialFiles(entryId, files);
+      const added = await addDroppedMaterialFiles(entryId, files, progress);
+      progress.close();
       if (added) await onDone();
     } catch (err) { toast(err.message, 'err'); }
+    finally { progress.close(); }
   };
 }
 
@@ -3082,37 +3195,36 @@ function setupGlobalDrop() {
     clearTimeout(hideTimer);
     hideDragOverlay();
     if (ev.target instanceof Element && ev.target.closest('.entry-card, .material-drop, .modal-mask')) return;
+    const progress = taskProgress('正在读取拖入文件…');
     let paths = [];
-    let infos = [];
-    try { paths = await droppedFilesToPaths([...ev.dataTransfer.files]); }
-    catch (e) { toast(e.message || '读取拖入文件失败', 'err'); return; }
-    try { infos = await materialInfosForPaths(paths); }
-    catch (e) { await cleanupDroppedPaths(paths); toast(e.message || '识别拖入材料失败', 'err'); return; }
-    const invoiceInfos = infos.filter(isInvoiceImportInfo);
-    const materialInfos = infos.filter(isLooseMaterialInfo);
-    if (invoiceInfos.length) {
-      try {
+    try {
+      paths = await droppedFilesToPaths([...ev.dataTransfer.files]);
+      progress.update('正在识别文件类型和材料信息…');
+      const infos = await materialInfosForPaths(paths);
+      const invoiceInfos = infos.filter(isInvoiceImportInfo);
+      const materialInfos = infos.filter(isLooseMaterialInfo);
+      if (invoiceInfos.length) {
+        progress.update('正在扫描发票并整理导入分组…');
         const scan = await Api.scanFiles(invoiceInfos.map((info) => info.path));
         openBatchImportPreview(scan, `${invoiceInfos.length} 个拖入文件`, {
           pendingMaterialInfos: materialInfos,
           cleanupPaths: paths,
         });
-      } catch (e) {
-        await cleanupDroppedPaths(paths);
-        toast('扫描失败：' + e.message, 'err');
+        return;
       }
-      return;
-    }
-    if (materialInfos.length) {
-      try { await handleLooseMaterialInfos(materialInfos, paths); }
-      catch (e) {
-        await cleanupDroppedPaths(paths);
-        toast(e.message, 'err');
+      if (materialInfos.length) {
+        progress.update('正在识别金额并匹配对应条目…');
+        await handleLooseMaterialInfos(materialInfos, paths);
+        return;
       }
-      return;
+      await cleanupDroppedPaths(paths);
+      toast('请拖入发票 PDF、XML、付款截图或查验单', 'err');
+    } catch (e) {
+      await cleanupDroppedPaths(paths);
+      toast(e.message || '处理拖入文件失败', 'err');
+    } finally {
+      progress.close();
     }
-    await cleanupDroppedPaths(paths);
-    toast('请拖入发票 PDF、XML、付款截图或查验单', 'err');
   });
   document.addEventListener('dragend', () => {
     clearTimeout(hideTimer);
@@ -3149,11 +3261,14 @@ function setupClipboardUpload() {
     if (!files.length) return;
     ev.preventDefault();
     const activeEntryId = State.activeDetailEntryId;
+    const progress = taskProgress('正在读取剪切板材料…');
     let paths = [];
     try {
       paths = await droppedFilesToPaths(files);
+      progress.update('正在识别文件类型和材料信息…');
       const infos = await materialInfosForPaths(paths);
       if (activeEntryId) {
+        progress.update('正在添加材料并识别付款金额…');
         await addMaterialInfosToEntry(activeEntryId, infos);
         await cleanupDroppedPaths(paths);
         await refreshEntries();
@@ -3163,12 +3278,14 @@ function setupClipboardUpload() {
       const invoiceInfos = infos.filter(isInvoiceImportInfo);
       const materialInfos = infos.filter(isLooseMaterialInfo);
       if (invoiceInfos.length) {
+        progress.update('正在扫描发票并整理导入分组…');
         const scan = await Api.scanFiles(invoiceInfos.map((info) => info.path));
         openBatchImportPreview(scan, `剪切板 ${invoiceInfos.length} 个文件`, {
           pendingMaterialInfos: materialInfos,
           cleanupPaths: paths,
         });
       } else if (materialInfos.length) {
+        progress.update('正在识别金额并匹配对应条目…');
         await handleLooseMaterialInfos(materialInfos, paths);
       } else {
         await cleanupDroppedPaths(paths);
@@ -3177,6 +3294,8 @@ function setupClipboardUpload() {
     } catch (e) {
       await cleanupDroppedPaths(paths);
       toast(e.message || '读取剪切板失败', 'err');
+    } finally {
+      progress.close();
     }
   });
 }
@@ -3224,45 +3343,62 @@ async function openAttachDroppedFiles(paths, options = {}) {
     return;
   }
 
+  const entryOptions = '<option value="">请选择条目</option>' +
+    entries.map((e) => `<option value="${e.id}">${esc(dropEntryLabel(e))}</option>`).join('');
   const body = el('div');
   const rows = infos.map((info, idx) => `
     <div class="drop-bind-row">
-      <span class="attach-name" title="${esc(info.path)}">${esc(info.name || baseName(info.path))}${info.invoice_no ? ` · ${esc(info.invoice_no)}` : ''}</span>
+      <div class="drop-bind-file">
+        <span class="attach-name" title="${esc(info.path)}">${esc(info.name || baseName(info.path))}${info.invoice_no ? ` · ${esc(info.invoice_no)}` : ''}</span>
+        ${info.binding_reason ? `<small>${esc(info.binding_reason)}</small>` : ''}
+      </div>
+      <select data-drop-entry="${idx}" aria-label="绑定到条目">${entryOptions}</select>
       <select data-drop-type="${idx}">
         ${ATTACHMENT_TYPE_OPTS.filter(([v]) => ['payment_screenshot', 'inspection_pdf', 'other'].includes(v))
           .map(([v, l]) => `<option value="${v}"${v === info.type ? ' selected' : ''}>${l}</option>`).join('')}
       </select>
     </div>`).join('');
   body.innerHTML = `
-    <div class="form-row">
-      <label>绑定到条目</label>
-      <select id="dropEntry">
-        ${entries.map((e) => `<option value="${e.id}">${esc(dropEntryLabel(e))}</option>`).join('')}
-      </select>
-    </div>
+    <div class="hint">这些材料无法唯一匹配，请逐份确认要绑定的条目。</div>
     <div class="drop-bind-list">${rows}</div>`;
   const m = modal({
     title: '绑定材料',
-    body,
+    body, wide: true,
     onClose: () => cleanupDroppedPaths(cleanupPaths),
     footer: [
       mkBtn('取消', 'ghost', async () => {
         await cleanupDroppedPaths(cleanupPaths);
         m.close();
       }),
-      mkBtn('添加到条目', 'primary', async () => {
-        const entryId = body.querySelector('#dropEntry').value;
+      mkBtn('确认绑定', 'primary', async () => {
+        let progress = null;
         try {
           const selectedInfos = infos.map((info, idx) => ({
             ...info,
+            entryId: body.querySelector(`[data-drop-entry="${idx}"]`).value,
             type: body.querySelector(`[data-drop-type="${idx}"]`).value,
           }));
-          const result = await addMaterialInfosToEntry(entryId, selectedInfos);
+          if (selectedInfos.some((info) => !info.entryId)) {
+            toast('请为每份材料选择条目', 'err');
+            return;
+          }
+          progress = taskProgress(`正在绑定 ${selectedInfos.length} 份材料…`);
+          const grouped = new Map();
+          selectedInfos.forEach((info) => {
+            if (!grouped.has(info.entryId)) grouped.set(info.entryId, []);
+            grouped.get(info.entryId).push(info);
+          });
+          const messages = [];
+          for (const [entryId, group] of grouped) {
+            const result = await addMaterialInfosToEntry(entryId, group);
+            if (result.message) messages.push(result.message);
+          }
           await cleanupDroppedPaths(cleanupPaths);
           m.close();
           await refreshEntries();
-          toast(result.message || '材料已添加', 'ok');
+          toast(messages.join('；') || `已绑定 ${selectedInfos.length} 份材料`, 'ok');
         } catch (e) { toast(e.message, 'err'); }
+        finally { progress?.close(); }
       }),
     ],
   });
@@ -3290,13 +3426,18 @@ async function addAttachmentFlow(entryId, parentModal, presetType) {
     footer: [
       mkBtn('取消', 'ghost', () => m.close()),
       mkBtn('选择文件并添加', 'primary', async () => {
+        let progress = null;
         try {
           const type = body.querySelector('#atType').value;
           const res = await Api.pickFiles(type === 'payment_screenshot');
           const paths = res.paths || [];
           if (!paths.length) return;
+          progress = taskProgress(type === 'payment_screenshot'
+            ? '正在识别付款截图金额…'
+            : '正在校验并添加附件…');
           if (type === 'payment_screenshot') {
             const infos = (await materialInfosForPaths(paths)).map((info) => ({ ...info, type }));
+            progress.update('正在添加截图并处理实付金额…');
             const result = await addMaterialInfosToEntry(entryId, infos);
             m.close(); parentModal.close(); openEntryDetail(entryId); await refreshEntries();
             toast(result.message || '附件已添加', 'ok');
@@ -3306,6 +3447,7 @@ async function addAttachmentFlow(entryId, parentModal, presetType) {
             toast('附件已添加', 'ok');
           }
         } catch (err) { toast(err.message, 'err'); }
+        finally { progress?.close(); }
       }),
     ],
   });
@@ -3375,15 +3517,26 @@ async function doExport(ids) {
         const name = body.querySelector('#exName').value.trim() || defaultName;
         const chosen = [...body.querySelectorAll('[data-export]:checked')].map((x) => x.dataset.export);
         if (!chosen.length) { toast('请选择至少一种导出内容', 'err'); return; }
+        const progress = taskProgress(`正在准备 ${ids.length} 条报账数据…`);
         try {
           const outputs = [];
-          if (chosen.includes('bindle')) outputs.push(await Api.exportBindle(ids, name + '-绑定包'));
-          if (chosen.includes('excel')) outputs.push(await Api.exportOverviewExcel(ids, name + '-总览'));
-          if (chosen.includes('archive')) outputs.push(await Api.exportAttachmentArchive(ids, name + '-附件'));
+          if (chosen.includes('bindle')) {
+            progress.update('正在生成绑定包…');
+            outputs.push(await Api.exportBindle(ids, name + '-绑定包'));
+          }
+          if (chosen.includes('excel')) {
+            progress.update('正在生成总览 Excel…');
+            outputs.push(await Api.exportOverviewExcel(ids, name + '-总览'));
+          }
+          if (chosen.includes('archive')) {
+            progress.update('正在整理并压缩附件…');
+            outputs.push(await Api.exportAttachmentArchive(ids, name + '-附件'));
+          }
           m.close();
           showExportResult(outputs);
           toast(`已导出 ${outputs.length} 个文件`, 'ok');
         } catch (e) { toast(e.message, 'err'); }
+        finally { progress.close(); }
       }),
     ],
   });
@@ -3424,15 +3577,22 @@ async function doImport() {
     const paths = res.paths || [];
     if (!paths.length) return;
     const path = paths[0];
-    const insp = await Api.inspectBindle(path);
-    let allow = false;
-    if (!insp.verified) {
-      if (!confirm(`这份文件被改过（${insp.tampered.join(', ')}）。\n仍要导入吗？导入后这些条目会标记为可疑。`)) return;
-      allow = true;
+    const progress = taskProgress('正在检查绑定包完整性…');
+    try {
+      const insp = await Api.inspectBindle(path);
+      let allow = false;
+      if (!insp.verified) {
+        if (!confirm(`这份文件被改过（${insp.tampered.join(', ')}）。\n仍要导入吗？导入后这些条目会标记为可疑。`)) return;
+        allow = true;
+      }
+      progress.update('正在导入条目和附件…');
+      const r = await Api.importBindle(path, State.currentProfileId, allow);
+      progress.update('正在刷新条目列表…');
+      await refreshEntries();
+      toast(r.message + `（${r.imported} 条）`, r.tampered && r.tampered.length ? 'err' : 'ok');
+    } finally {
+      progress.close();
     }
-    const r = await Api.importBindle(path, State.currentProfileId, allow);
-    await refreshEntries();
-    toast(r.message + `（${r.imported} 条）`, r.tampered && r.tampered.length ? 'err' : 'ok');
   } catch (e) { toast(e.message, 'err'); }
 }
 
@@ -3456,17 +3616,28 @@ async function openPrintDialog(ids) {
   }
 
   const OUTPUTS = [
+    ['make_entry_bundle_pdf', '按条目材料拼接 PDF'],
+    ['make_reimburse_doc', '报账说明 Word'], ['make_acceptance_doc', '验收单 Word'],
+  ];
+  const LEGACY_OUTPUTS = [
     ['make_invoice_pdf', '发票拼接 PDF'], ['make_payment_pdf', '付款截图拼接 PDF'],
-    ['make_inspection_pdf', '查验单拼接 PDF'], ['make_reimburse_doc', '报账说明 Word'],
-    ['make_acceptance_doc', '验收单 Word'],
+    ['make_inspection_pdf', '查验单拼接 PDF'],
   ];
 
   const body = el('div');
   body.innerHTML = `
     <div class="detail-section">
+      <h3>生成内容<span class="h3-line"></span></h3>
       <div class="check-grid">
         ${OUTPUTS.map(([k, label]) => `<label class="chk"><input type="checkbox" data-out="${k}" checked/> ${label}</label>`).join('')}
       </div>
+      <label class="print-annotation-option"><input type="checkbox" id="pAnnotate" checked/><span><b>叠加条目编号与页码</b><small>便于纸质审查时核对材料归属；不需要时可关闭。</small></span></label>
+      <details class="print-legacy-outputs">
+        <summary>按材料类型分别导出（可选）</summary>
+        <div class="check-grid">
+          ${LEGACY_OUTPUTS.map(([k, label]) => `<label class="chk"><input type="checkbox" data-out="${k}"/> ${label}</label>`).join('')}
+        </div>
+      </details>
     </div>
     <div class="form-grid">
       <div class="form-row"><label>文档日期</label><input id="pDate" placeholder="如 2026年7月5日"/></div>
@@ -3477,7 +3648,7 @@ async function openPrintDialog(ids) {
   const genBtn = mkBtn('生成打印件', 'primary', async () => {
     const options = {};
     body.querySelectorAll('[data-out]').forEach((c) => { options[c.dataset.out] = c.checked; });
-    options.annotate = true;
+    options.annotate = body.querySelector('#pAnnotate').checked;
     const date = body.querySelector('#pDate').value.trim();
     if (date) options.document_date = date;
     options.storage_location = body.querySelector('#pLoc').value.trim() || '工训楼';
@@ -3505,6 +3676,7 @@ async function openPrintDialog(ids) {
 
 function showPrintResult(results) {
   const OUT_LABEL = {
+    entry_bundle_pdf: '按条目材料拼接 PDF',
     invoice_pdf: '发票拼接 PDF', payment_pdf: '付款截图拼接 PDF', inspection_pdf: '查验单拼接 PDF',
     reimburse_doc: '报账说明 Word', acceptance_doc: '验收单 Word',
   };

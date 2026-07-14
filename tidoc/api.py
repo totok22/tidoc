@@ -286,6 +286,17 @@ class Api:
         return out
 
     @_guard
+    def suggest_material_bindings(self, infos, candidate_entry_ids=None):
+        """按发票号或付款金额给出唯一匹配；不唯一时由前端逐份手动绑定。"""
+        from .services.folder_import import suggest_material_bindings
+
+        entries = self.entries.list()
+        candidate_ids = {str(value) for value in (candidate_entry_ids or []) if value}
+        if candidate_ids:
+            entries = [entry for entry in entries if entry.get("id") in candidate_ids]
+        return suggest_material_bindings(infos or [], entries)
+
+    @_guard
     def batch_create_entries(self, profile_id, groups, title=""):
         """按前端确认后的分组批量创建条目。
 
@@ -652,7 +663,7 @@ class Api:
 
     @_guard
     def build_prints(self, entry_ids, options=None, out_name=None):
-        """生成打印件（发票拼接 / 付款截图拼接 / 查验单拼接 / 报账说明 / 验收单）。
+        """生成打印件（默认按条目拼接材料；可选按材料分开、Word 文档）。
         按抬头强隔离，输出到 exports/<out_name>/<抬头>/。"""
         from .services.printing import build_prints as _build
         name = out_name or "打印件"

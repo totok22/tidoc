@@ -116,6 +116,7 @@ const Api = (() => {
     scanFolder: (folder) => call('scan_folder', folder),
     scanFiles: (paths) => call('scan_files', paths || []),
     classifyMaterialFiles: (paths) => call('classify_material_files', paths || []),
+    suggestMaterialBindings: (infos, candidateEntryIds) => call('suggest_material_bindings', infos || [], candidateEntryIds || []),
     saveDroppedFiles: (files) => call('save_dropped_files', files || []),
     cleanupDroppedFiles: (paths) => call('cleanup_dropped_files', paths || []),
     batchCreateEntries: (profileId, groups, title) => call('batch_create_entries', profileId, groups, title || ''),

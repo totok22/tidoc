@@ -158,6 +158,60 @@ def extract_payment_image_amount(path: str | Path) -> str:
     return _payment_amount_from_text(text)
 
 
+def suggest_material_bindings(infos: list[dict], entries: list[dict]) -> list[dict]:
+    """仅在归属唯一时给出自动绑定建议；其余材料返回明确的手动处理原因。"""
+    planned = []
+    for raw in infos or []:
+        info = dict(raw)
+        matches: list[dict] = []
+        reason = ""
+        if info.get("type") == "inspection_pdf":
+            invoice_no = str(info.get("invoice_no") or "").strip()
+            if invoice_no:
+                matches = [entry for entry in entries if str(entry.get("invoice_no") or "") == invoice_no]
+                if not matches:
+                    reason = f"发票号 {invoice_no} 没有对应条目"
+                elif len(matches) > 1:
+                    reason = f"发票号 {invoice_no} 对应 {len(matches)} 个条目"
+            else:
+                reason = "未识别到查验单发票号码"
+        elif info.get("type") == "payment_screenshot":
+            amount = _normalized_payment_amount(info.get("paid_amount"))
+            if amount is not None:
+                matches = [
+                    entry for entry in entries
+                    if _normalized_payment_amount(entry.get("total")) == amount
+                ]
+                shown = f"{amount:.2f}"
+                if not matches:
+                    reason = f"识别到付款 ¥{shown}，没有金额相同的条目"
+                elif len(matches) > 1:
+                    reason = f"识别到付款 ¥{shown}，有 {len(matches)} 个金额相同的条目"
+            else:
+                reason = "未识别到付款金额"
+        else:
+            reason = "无法自动判断材料归属"
+
+        if len(matches) == 1:
+            info["suggested_entry_id"] = matches[0].get("entry_id") or matches[0].get("id") or ""
+            info["binding_reason"] = ""
+        else:
+            info["suggested_entry_id"] = ""
+            info["binding_reason"] = f"{reason}，请手动选择。"
+        planned.append(info)
+    return planned
+
+
+def _normalized_payment_amount(value) -> Decimal | None:
+    text = str(value or "").replace(",", "").replace("，", "").replace("¥", "").replace("￥", "").strip()
+    if not text:
+        return None
+    try:
+        return Decimal(text).quantize(Decimal("0.01"))
+    except (InvalidOperation, ValueError):
+        return None
+
+
 def _payment_amount_from_text(text: str) -> str:
     compact = re.sub(r"\s+", "", text or "")
     compact = re.sub(r"(?<=\d)[·．。](?=\d)", ".", compact)

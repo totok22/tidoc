@@ -3,7 +3,7 @@
 对外主入口 build_print_package：
 - 输入一组 PrintEntry（可跨人）+ 选项。
 - 按抬头强隔离分组，每个抬头单独出一套文件，绝不混合（第 7 节）。
-- 生成：发票拼接 PDF、付款截图拼接 PDF、查验单拼接 PDF、报账说明 Word、验收单 Word。
+- 默认按条目连续生成材料拼接 PDF；也可按材料类型分别生成旧式拼接 PDF。
 - 拼接页只叠加份数 / 页码编号。
 """
 
@@ -13,9 +13,10 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from .models import PersonProfile, PrintEntry
-from .pdf_merge import images_to_pdf, merge_pdfs
+from .pdf_merge import images_to_pdf, merge_pdf_groups, merge_pdfs
 from .word_docs import generate_acceptance_doc, generate_reimburse_doc
 
 # 旧配置保留兼容；当前打印件只使用固定编号，不再展示发票号/姓名/金额。
@@ -33,9 +34,10 @@ class PrintOptions:
     annotate: bool = True                         # 拼接页是否叠加信息
     annotation_fields: tuple[str, ...] = ("invoice_no", "person_name", "paid_amount")
     batch_note: str = ""
-    make_invoice_pdf: bool = True
-    make_payment_pdf: bool = True
-    make_inspection_pdf: bool = True
+    make_entry_bundle_pdf: bool = True
+    make_invoice_pdf: bool = False
+    make_payment_pdf: bool = False
+    make_inspection_pdf: bool = False
     make_reimburse_doc: bool = True
     make_acceptance_doc: bool = True
 
@@ -95,7 +97,33 @@ def build_print_package(
         title_dir.mkdir(parents=True, exist_ok=True)
         res = PrintResult(title=title)
 
-        # 1. 发票拼接 PDF
+        # 1. 默认打印件：每个条目的发票、付款截图、查验单连续排列。
+        if options.make_entry_bundle_pdf:
+            with TemporaryDirectory(prefix="tidoc-entry-materials-") as tmp:
+                groups: list[list[str | Path]] = []
+                for entry_idx, e in enumerate(group, start=1):
+                    parts: list[str | Path] = list(e.invoice_pdfs)
+                    if e.payment_images:
+                        payment_pdf = Path(tmp) / f"payment-{entry_idx}.pdf"
+                        images_to_pdf(
+                            e.payment_images,
+                            payment_pdf,
+                            show_page_footer=False,
+                        )
+                        parts.append(payment_pdf)
+                    parts.extend(e.inspection_pdfs)
+                    if parts:
+                        groups.append(parts)
+                if groups:
+                    out = merge_pdf_groups(
+                        groups,
+                        title_dir / "按条目材料拼接.pdf",
+                        numbered=options.annotate,
+                        batch_note=options.batch_note,
+                    )
+                    res.files["entry_bundle_pdf"] = str(out)
+
+        # 2. 兼容导出：按材料类型分别拼接。
         if options.make_invoice_pdf:
             paths, annos = [], []
             for e in group:
@@ -107,12 +135,12 @@ def build_print_package(
                     paths,
                     title_dir / "发票拼接.pdf",
                     annos if options.annotate else None,
-                    numbered=True,
+                    numbered=options.annotate,
                     batch_note=options.batch_note,
                 )
                 res.files["invoice_pdf"] = str(out)
 
-        # 2. 付款截图拼接 PDF
+        # 3. 付款截图拼接 PDF
         if options.make_payment_pdf:
             imgs, annos = [], []
             for entry_idx, e in enumerate(group, start=1):
@@ -126,22 +154,23 @@ def build_print_package(
                     title_dir / "付款截图拼接.pdf",
                     annos if options.annotate else None,
                     batch_note=options.batch_note,
+                    show_page_footer=options.annotate,
                 )
                 res.files["payment_pdf"] = str(out)
 
-        # 3. 查验单拼接 PDF
+        # 4. 查验单拼接 PDF
         if options.make_inspection_pdf:
             paths = [p for e in group for p in e.inspection_pdfs]
             if paths:
                 out = merge_pdfs(
                     paths,
                     title_dir / "查验单拼接.pdf",
-                    numbered=True,
+                    numbered=options.annotate,
                     batch_note=options.batch_note,
                 )
                 res.files["inspection_pdf"] = str(out)
 
-        # 4. 报账说明 Word（按报账人分别出，因抬头段是个人信息）
+        # 5. 报账说明 Word（按报账人分别出，因抬头段是个人信息）
         if options.make_reimburse_doc:
             # 同一抬头下可能跨人；报账说明抬头段取该组第一个报账人
             first = group[0]
@@ -149,7 +178,7 @@ def build_print_package(
             out = generate_reimburse_doc(group, title_dir / "报账说明.docx", options.document_date, profile)
             res.files["reimburse_doc"] = str(out)
 
-        # 5. 验收单 Word
+        # 6. 验收单 Word
         if options.make_acceptance_doc:
             out = generate_acceptance_doc(group, title_dir / "验收单.docx", options.document_date, options.storage_location)
             res.files["acceptance_doc"] = str(out)

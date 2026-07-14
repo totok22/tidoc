@@ -1,6 +1,7 @@
 """批次仓库、标签/备注筛选维度、schema 迁移的测试。"""
 
 import sqlite3
+from decimal import Decimal
 
 import pytest
 
@@ -182,6 +183,28 @@ def test_keyword_search_includes_invoice_and_paid_amount(repos):
 
     assert [e["id"] for e in repos["entries"].list(keyword="¥1,234.50")] == [entry_id]
     assert [e["id"] for e in repos["entries"].list(keyword="1188")] == [entry_id]
+
+
+def test_modified_view_only_tracks_paid_amount_difference(repos, sample_xmls):
+    profile = repos["profiles"].create("张三", "李老师")
+    parsed = parse_xml(sample_xmls[0])
+    entry_id = repos["entries"].create(profile["id"], title=parsed.buyer_name, parsed=parsed)
+    total = repos["entries"].get(entry_id)["total"]
+
+    repos["entries"].update_field(entry_id, "actual_item_name", "改过的物资名", profile["id"])
+    repos["entries"].update_field(entry_id, "notes", "保留修改记录", profile["id"])
+    assert repos["entries"].list(modified_only=True) == []
+    assert repos["entries"].list()[0]["modified_fields"] == []
+
+    different = str(Decimal(total) + Decimal("1.00"))
+    repos["entries"].update_field(entry_id, "paid_amount", different, profile["id"])
+    modified = repos["entries"].list(modified_only=True)
+    assert [entry["id"] for entry in modified] == [entry_id]
+    assert modified[0]["modified_fields"] == ["paid_amount"]
+
+    repos["entries"].update_field(entry_id, "paid_amount", total, profile["id"])
+    assert repos["entries"].get(entry_id)["fields"]["paid_amount"]["modified"] is True
+    assert repos["entries"].list(modified_only=True) == []
 
 
 # ------------------------------------------------------------------ 迁移

@@ -195,6 +195,30 @@ def test_extract_payment_amount_from_ocr_text():
     assert _payment_amount_from_text("账 单 管 理 一 83 ． 1 0 交 易 成 功") == "83.10"
 
 
+def test_material_binding_suggestion_requires_unique_match():
+    from tidoc.services.folder_import import suggest_material_bindings
+
+    entries = [
+        {"id": "a", "invoice_no": "111", "total": "128.62"},
+        {"id": "b", "invoice_no": "222", "total": "200.13"},
+        {"id": "c", "invoice_no": "333", "total": "200.13"},
+    ]
+    planned = suggest_material_bindings([
+        {"path": "pay-a.jpg", "type": "payment_screenshot", "paid_amount": "128.62"},
+        {"path": "pay-duplicate.jpg", "type": "payment_screenshot", "paid_amount": "200.13"},
+        {"path": "pay-missing.jpg", "type": "payment_screenshot", "paid_amount": ""},
+        {"path": "pay-none.jpg", "type": "payment_screenshot", "paid_amount": "9.99"},
+        {"path": "inspection.pdf", "type": "inspection_pdf", "invoice_no": "111"},
+    ], entries)
+
+    assert planned[0]["suggested_entry_id"] == "a"
+    assert planned[1]["suggested_entry_id"] == ""
+    assert "2 个金额相同" in planned[1]["binding_reason"]
+    assert "未识别到付款金额" in planned[2]["binding_reason"]
+    assert "没有金额相同" in planned[3]["binding_reason"]
+    assert planned[4]["suggested_entry_id"] == "a"
+
+
 def test_windows_payment_ocr_runs_powershell_hidden(monkeypatch, tmp_path):
     from types import SimpleNamespace
     from tidoc.services import folder_import

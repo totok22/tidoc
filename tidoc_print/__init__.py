@@ -3,8 +3,8 @@
 重依赖（python-docx / pypdf / Pillow / reportlab）都在这个包里，核心不 import 它。
 核心通过 is_available() 探测组件是否已安装，未装则相关入口置灰。
 
-设计文档第 9 节：跨人合并、按抬头强隔离、可勾选叠加信息、生成
-发票拼接 PDF / 付款截图拼接 PDF / 查验单拼接 PDF / 报账说明 Word / 验收单 Word。
+设计文档第 9 节：跨人合并、按抬头强隔离、可勾选叠加信息；默认按条目
+连续生成材料 PDF，也可按材料类型分别生成旧式拼接 PDF。
 """
 
 from __future__ import annotations
