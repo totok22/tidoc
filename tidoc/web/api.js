@@ -62,6 +62,7 @@ const Api = (() => {
     updateField: (id, field, value, pid) => call('update_field', id, field, value, pid || ''),
     correctLocked: (id, field, value, pid) => call('correct_locked_field', id, field, value, pid || ''),
     updateEntryProfile: (id, profileId, operatorProfileId) => call('update_entry_profile', id, profileId, operatorProfileId || ''),
+    updateEntryProfiles: (ids, profileId, operatorProfileId) => call('update_entry_profiles', ids || [], profileId, operatorProfileId || ''),
     setStatus: (id, status) => call('set_status', id, status),
     setMeta: (id, category, tags) => call('set_meta', id, category, tags),
     deleteEntry: (id) => call('delete_entry', id),

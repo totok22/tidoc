@@ -60,6 +60,7 @@ class EntryRepo:
         title: str = "",
         parsed: ParsedInvoice | None = None,
         status: str = STATUS_DRAFT,
+        default_paid_to_total: bool = True,
     ) -> str:
         entry_id = uuid.uuid4().hex
         now = _now()
@@ -73,9 +74,9 @@ class EntryRepo:
              p.seller, str(money(p.total)) if p.total else "", p.buyer_name,
              p.buyer_tax_id, status, "warning", p.source, now, now),
         )
-        # 可改字段初始化：origin = current；实付默认按发票总额，付款截图上传时再提醒确认或修改。
+        # 可改字段初始化：origin = current；实付是否默认按发票总额由应用偏好决定。
         for field in EDITABLE_FIELDS:
-            origin = self._initial_editable(field, p)
+            origin = self._initial_editable(field, p, default_paid_to_total)
             self.db.conn.execute(
                 "INSERT INTO entry_fields(entry_id, field, origin, current, modified) VALUES(?,?,?,?,0)",
                 (entry_id, field, origin, origin),
@@ -93,9 +94,11 @@ class EntryRepo:
         return entry_id
 
     @staticmethod
-    def _initial_editable(field: str, p: ParsedInvoice) -> str:
+    def _initial_editable(
+        field: str, p: ParsedInvoice, default_paid_to_total: bool = True
+    ) -> str:
         if field == "paid_amount":
-            return str(money(p.total)) if p.total else ""
+            return str(money(p.total)) if p.total and default_paid_to_total else ""
         if field == "actual_item_name":
             return p.items[0].actual_name if p.items else ""
         return ""
@@ -401,6 +404,48 @@ class EntryRepo:
         self._touch(entry_id)
         self.db.conn.commit()
         return self.get(entry_id)
+
+    def set_profiles(
+        self,
+        entry_ids: list[str],
+        new_profile_id: str,
+        operator_profile_id: str = "",
+    ) -> int:
+        """批量修改条目归属，统一提交并为每个实际变化的条目保留历史。"""
+        prof = self.db.conn.execute(
+            "SELECT name, reviewer FROM profiles WHERE id = ?", (new_profile_id,)
+        ).fetchone()
+        if prof is None:
+            raise ValueError("报账人不存在。")
+
+        changed = 0
+        seen: set[str] = set()
+        new_value = " → ".join([x for x in (prof["name"], prof["reviewer"]) if x]) or new_profile_id
+        for entry_id in (entry_ids or []):
+            if not entry_id or entry_id in seen:
+                continue
+            seen.add(entry_id)
+            row = self.db.conn.execute(
+                """SELECT e.profile_id, old_p.name AS old_name, old_p.reviewer AS old_reviewer
+                     FROM entries e
+                     LEFT JOIN profiles old_p ON old_p.id = e.profile_id
+                    WHERE e.id = ?""",
+                (entry_id,),
+            ).fetchone()
+            if row is None or row["profile_id"] == new_profile_id:
+                continue
+            old_value = " → ".join(
+                [x for x in (row["old_name"], row["old_reviewer"]) if x]
+            ) or (row["profile_id"] or "")
+            self.db.conn.execute(
+                "UPDATE entries SET profile_id = ? WHERE id = ?",
+                (new_profile_id, entry_id),
+            )
+            self._log_history(entry_id, "报账人", old_value, new_value, operator_profile_id)
+            self._touch(entry_id)
+            changed += 1
+        self.db.conn.commit()
+        return changed
 
     def _log_history(self, entry_id, field, old_value, new_value, profile_id) -> None:
         self.db.conn.execute(

@@ -3,9 +3,11 @@
 import os
 import zipfile
 import base64
+from decimal import Decimal
 
 from tidoc.db import STATUS_COMPLETE, TYPE_INVOICE_XML
 from tidoc.engine import parse_xml
+from tidoc.engine.models import ParsedInvoice
 from tidoc.services import export_bindle, import_bindle, inspect_bindle
 
 
@@ -50,6 +52,19 @@ def test_paid_amount_defaults_to_invoice_total(repos, sample_xmls):
     assert paid["modified"] is False
 
 
+def test_paid_amount_default_can_be_left_blank(repos):
+    profile = repos["profiles"].create("张三", "李老师")
+    parsed = ParsedInvoice(total=Decimal("32.29"))
+
+    entry_id = repos["entries"].create(
+        profile["id"], parsed=parsed, default_paid_to_total=False
+    )
+
+    entry = repos["entries"].get(entry_id)
+    assert entry["total"] == "32.29"
+    assert entry["fields"]["paid_amount"]["current"] == ""
+
+
 def test_locked_field_correction_logged(repos, sample_xmls):
     p = repos["profiles"].create("张三", "李老师")
     parsed = parse_xml(sample_xmls[0])
@@ -70,6 +85,20 @@ def test_entry_profile_can_be_changed_and_logged(repos, sample_xmls):
 
     assert e["profile_id"] == p2["id"]
     assert any(h["field"] == "报账人" and "王五" in h["new_value"] for h in e["history"])
+
+
+def test_entry_profiles_can_be_changed_in_batch(repos):
+    p1 = repos["profiles"].create("张三", "李老师")
+    p2 = repos["profiles"].create("王五", "赵老师")
+    ids = [repos["entries"].create(p1["id"]) for _ in range(3)]
+
+    changed = repos["entries"].set_profiles(ids + [ids[0]], p2["id"], p1["id"])
+
+    assert changed == 3
+    for entry_id in ids:
+        entry = repos["entries"].get(entry_id)
+        assert entry["profile_id"] == p2["id"]
+        assert any(h["field"] == "报账人" and "王五" in h["new_value"] for h in entry["history"])
 
 
 def test_print_uses_operator_profile_for_reimburse_doc(repos, sample_xmls, tmp_path, monkeypatch):
@@ -234,6 +263,56 @@ def test_api_can_recognize_payment_ocr_without_applying(api, sample_xmls, tmp_pa
     assert res["payment_ocr"] == {"paid_amount": "27.00", "applied": False}
     updated = api.get_entry(e["id"])["data"]
     assert updated["fields"]["paid_amount"]["current"] == before
+
+
+def test_api_payment_ocr_preference_disables_recognition(api, tmp_path, monkeypatch):
+    from tidoc.api import PAYMENT_OCR_PREF_KEY
+    from tidoc.services import folder_import
+
+    profile = api.create_profile("张三", "李老师")["data"]
+    entry = api.create_entry(profile["id"])["data"]
+    payment = tmp_path / "付款截图.png"
+    payment.write_bytes(b"fake image")
+    api.set_app_preference(PAYMENT_OCR_PREF_KEY, "0")
+
+    def unexpected_ocr(path):
+        raise AssertionError(f"OCR should be disabled: {path}")
+
+    monkeypatch.setattr(folder_import, "extract_payment_image_amount", unexpected_ocr)
+    classified = api.classify_material_files([str(payment)])["data"]
+    attachment = api.add_attachment(entry["id"], str(payment), "payment_screenshot")["data"]
+
+    assert classified[0]["paid_amount"] == ""
+    assert "payment_ocr" not in attachment
+
+
+def test_api_default_paid_preference_is_independent_from_ocr(api):
+    from tidoc.api import DEFAULT_PAID_TO_INVOICE_PREF_KEY, PAYMENT_OCR_PREF_KEY
+
+    api.set_app_preference(PAYMENT_OCR_PREF_KEY, "0")
+    api.set_app_preference(DEFAULT_PAID_TO_INVOICE_PREF_KEY, "0")
+
+    assert api._payment_ocr_enabled() is False
+    assert api._default_paid_to_invoice() is False
+
+
+def test_api_create_entry_respects_blank_default_paid_preference(api, tmp_path, monkeypatch):
+    from tidoc import engine
+    from tidoc.api import DEFAULT_PAID_TO_INVOICE_PREF_KEY
+    from tidoc.engine.models import CheckResult
+
+    profile = api.create_profile("张三", "李老师")["data"]
+    pdf = tmp_path / "invoice.pdf"
+    pdf.write_bytes(b"fake pdf")
+    parsed = ParsedInvoice(total=Decimal("32.29"), invoice_no="123")
+    monkeypatch.setattr(engine, "parse_invoice_files", lambda *args, **kwargs: parsed)
+    monkeypatch.setattr(engine, "check_invoice", lambda *args, **kwargs: CheckResult("pass", ""))
+    api.set_app_preference(DEFAULT_PAID_TO_INVOICE_PREF_KEY, "0")
+
+    entry = api.create_entry(profile["id"], pdf_path=str(pdf))["data"]
+
+    assert entry["total"] == "32.29"
+    assert entry["fields"]["paid_amount"]["current"] == ""
 
 
 def test_dropped_file_cleanup(api):

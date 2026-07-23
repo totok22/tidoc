@@ -158,7 +158,9 @@ def extract_payment_image_amount(path: str | Path) -> str:
     return _payment_amount_from_text(text)
 
 
-def suggest_material_bindings(infos: list[dict], entries: list[dict]) -> list[dict]:
+def suggest_material_bindings(
+    infos: list[dict], entries: list[dict], payment_ocr_enabled: bool = True
+) -> list[dict]:
     """仅在归属唯一时给出自动绑定建议；其余材料返回明确的手动处理原因。"""
     planned = []
     for raw in infos or []:
@@ -176,19 +178,22 @@ def suggest_material_bindings(infos: list[dict], entries: list[dict]) -> list[di
             else:
                 reason = "未识别到查验单发票号码"
         elif info.get("type") == "payment_screenshot":
-            amount = _normalized_payment_amount(info.get("paid_amount"))
-            if amount is not None:
-                matches = [
-                    entry for entry in entries
-                    if _normalized_payment_amount(entry.get("total")) == amount
-                ]
-                shown = f"{amount:.2f}"
-                if not matches:
-                    reason = f"识别到付款 ¥{shown}，没有金额相同的条目"
-                elif len(matches) > 1:
-                    reason = f"识别到付款 ¥{shown}，有 {len(matches)} 个金额相同的条目"
+            if not payment_ocr_enabled:
+                reason = ""
             else:
-                reason = "未识别到付款金额"
+                amount = _normalized_payment_amount(info.get("paid_amount"))
+                if amount is not None:
+                    matches = [
+                        entry for entry in entries
+                        if _normalized_payment_amount(entry.get("total")) == amount
+                    ]
+                    shown = f"{amount:.2f}"
+                    if not matches:
+                        reason = f"识别到付款 ¥{shown}，没有金额相同的条目"
+                    elif len(matches) > 1:
+                        reason = f"识别到付款 ¥{shown}，有 {len(matches)} 个金额相同的条目"
+                else:
+                    reason = "未识别到付款金额"
         else:
             reason = "无法自动判断材料归属"
 
@@ -197,7 +202,7 @@ def suggest_material_bindings(infos: list[dict], entries: list[dict]) -> list[di
             info["binding_reason"] = ""
         else:
             info["suggested_entry_id"] = ""
-            info["binding_reason"] = f"{reason}，请手动选择。"
+            info["binding_reason"] = f"{reason}，请手动选择。" if reason else ""
         planned.append(info)
     return planned
 
@@ -290,23 +295,65 @@ function Recognize-Image($ImagePath) {
     $result = Await-Operation ($engine.RecognizeAsync($bitmap)) ([Windows.Media.Ocr.OcrResult])
     return $result.Text
 }
-function Crop-TopPaymentArea($ImagePath) {
+function Prepare-PaymentImage($ImagePath, $OutputPath, [double]$CropRatio, [double]$MaxUpscale) {
     $src = [System.Drawing.Bitmap]::new($ImagePath)
-    $rect = [System.Drawing.Rectangle]::new(0, 0, $src.Width, [int]($src.Height * 0.45))
-    $crop = $src.Clone($rect, $src.PixelFormat)
-    $scaled = [System.Drawing.Bitmap]::new([int]($crop.Width * 2), [int]($crop.Height * 2))
-    $g = [System.Drawing.Graphics]::FromImage($scaled)
-    $g.Clear([System.Drawing.Color]::White)
-    $g.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
-    $g.DrawImage($crop, 0, 0, $scaled.Width, $scaled.Height)
-    $out = [System.IO.Path]::ChangeExtension($ImagePath, '.top.png')
-    $scaled.Save($out, [System.Drawing.Imaging.ImageFormat]::Png)
-    $g.Dispose(); $scaled.Dispose(); $crop.Dispose(); $src.Dispose()
-    return $out
+    $crop = $null
+    $scaled = $null
+    $cropGraphics = $null
+    $scaleGraphics = $null
+    try {
+        $cropHeight = [Math]::Max(1, [int]($src.Height * $CropRatio))
+        $crop = [System.Drawing.Bitmap]::new(
+            $src.Width,
+            $cropHeight,
+            [System.Drawing.Imaging.PixelFormat]::Format32bppArgb
+        )
+        $cropGraphics = [System.Drawing.Graphics]::FromImage($crop)
+        $cropGraphics.Clear([System.Drawing.Color]::White)
+        $cropGraphics.DrawImage($src, 0, 0, $src.Width, $src.Height)
+
+        # Windows.Media.Ocr 拒绝任一边超过 MaxImageDimension 的图片。
+        # 手机长截图很容易超过限制，因此先统一缩放到安全范围；顶部区域可适度放大。
+        $maxDimension = 2400.0
+        $scale = [Math]::Min(
+            $MaxUpscale,
+            [Math]::Min($maxDimension / $crop.Width, $maxDimension / $crop.Height)
+        )
+        $targetWidth = [Math]::Max(1, [int]($crop.Width * $scale))
+        $targetHeight = [Math]::Max(1, [int]($crop.Height * $scale))
+        $scaled = [System.Drawing.Bitmap]::new(
+            $targetWidth,
+            $targetHeight,
+            [System.Drawing.Imaging.PixelFormat]::Format32bppArgb
+        )
+        $scaleGraphics = [System.Drawing.Graphics]::FromImage($scaled)
+        $scaleGraphics.Clear([System.Drawing.Color]::White)
+        $scaleGraphics.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+        $scaleGraphics.DrawImage($crop, 0, 0, $targetWidth, $targetHeight)
+        $scaled.Save($OutputPath, [System.Drawing.Imaging.ImageFormat]::Png)
+    } finally {
+        if ($null -ne $scaleGraphics) { $scaleGraphics.Dispose() }
+        if ($null -ne $cropGraphics) { $cropGraphics.Dispose() }
+        if ($null -ne $scaled) { $scaled.Dispose() }
+        if ($null -ne $crop) { $crop.Dispose() }
+        $src.Dispose()
+    }
 }
-Recognize-Image $Path
-$topPath = Crop-TopPaymentArea $Path
-Recognize-Image $topPath
+$prepared = @()
+try {
+    $fullPath = Join-Path ([System.IO.Path]::GetDirectoryName($Path)) 'payment-full.png'
+    Prepare-PaymentImage $Path $fullPath 1.0 1.0
+    $prepared += $fullPath
+    $topPath = Join-Path ([System.IO.Path]::GetDirectoryName($Path)) 'payment-top.png'
+    Prepare-PaymentImage $Path $topPath 0.55 2.0
+    $prepared += $topPath
+} catch {
+    # 个别系统不支持的图片编码仍交给 WinRT 解码器直接尝试。
+    $prepared = @($Path)
+}
+foreach ($image in $prepared) {
+    try { Recognize-Image $image } catch { }
+}
 """
     try:
         with tempfile.TemporaryDirectory(prefix="tidoc-ocr-") as tmp:
@@ -317,7 +364,7 @@ Recognize-Image $topPath
             script_path.write_text(script, encoding="utf-8")
             proc = subprocess.run(
                 [
-                    "powershell",
+                    "powershell.exe",
                     "-NoProfile",
                     "-NonInteractive",
                     "-WindowStyle",

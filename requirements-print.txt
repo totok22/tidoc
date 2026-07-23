@@ -1,6 +1,6 @@
-# 「打印导出组件」依赖（可选安装，不进核心包）——设计文档第 3、9 节
-# 开发阶段直接 pip install -r 本文件即可用；打包时这些重依赖拆到独立组件。
-python-docx==1.2.0   # 报账说明 / 验收单 Word（移植自 engine.py）
-pypdf==6.14.2        # 发票 / 查验单 PDF 拼接（与核心同款，组件内也用）
-Pillow==12.3.0       # 付款截图读取 / 转换
-reportlab==5.0.0     # 付款截图拼进 PDF、页面信息标注
+# Optional print/export component dependencies (see DESIGN sections 3 and 9)
+# Install this file for development; release builds package these separately.
+python-docx==1.2.0   # Word output
+pypdf==6.14.2        # PDF merging
+Pillow==12.3.0       # Payment image loading and conversion
+reportlab==5.0.0     # PDF image layout and annotations

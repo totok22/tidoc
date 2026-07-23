@@ -17,6 +17,15 @@ def main() -> int:
         text = re.sub(r'__version__ = "[^"]+"', f'__version__ = "{args.version}"', text)
         file.write_text(text, "utf-8")
         print(f"set {file} to {args.version}")
+    index = Path("tidoc/web/index.html")
+    text = index.read_text("utf-8")
+    text = re.sub(
+        r'((?:styles\.css|api\.js|app\.js)\?v=)[^"\']+',
+        rf'\g<1>{args.version}',
+        text,
+    )
+    index.write_text(text, "utf-8")
+    print(f"set {index} asset version to {args.version}")
     return 0
 
 

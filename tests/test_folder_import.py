@@ -219,6 +219,19 @@ def test_material_binding_suggestion_requires_unique_match():
     assert planned[4]["suggested_entry_id"] == "a"
 
 
+def test_payment_binding_has_no_false_warning_when_ocr_is_disabled():
+    from tidoc.services.folder_import import suggest_material_bindings
+
+    planned = suggest_material_bindings(
+        [{"path": "pay.jpg", "type": "payment_screenshot", "paid_amount": ""}],
+        [{"id": "a", "total": "32.29"}],
+        payment_ocr_enabled=False,
+    )
+
+    assert planned[0]["suggested_entry_id"] == ""
+    assert planned[0]["binding_reason"] == ""
+
+
 def test_windows_payment_ocr_runs_powershell_hidden(monkeypatch, tmp_path):
     from types import SimpleNamespace
     from tidoc.services import folder_import
@@ -226,7 +239,8 @@ def test_windows_payment_ocr_runs_powershell_hidden(monkeypatch, tmp_path):
     calls = []
 
     def fake_run(cmd, **kwargs):
-        calls.append((cmd, kwargs))
+        script_path = cmd[cmd.index("-File") + 1]
+        calls.append((cmd, kwargs, open(script_path, encoding="utf-8").read()))
         return SimpleNamespace(stdout="-12.34", stderr="")
 
     image = tmp_path / "付款截图.png"
@@ -236,10 +250,13 @@ def test_windows_payment_ocr_runs_powershell_hidden(monkeypatch, tmp_path):
     monkeypatch.setattr(folder_import.subprocess, "run", fake_run)
 
     assert folder_import.extract_payment_image_amount(image) == "12.34"
-    cmd, kwargs = calls[0]
+    cmd, kwargs, script = calls[0]
+    assert cmd[0] == "powershell.exe"
     assert "-WindowStyle" in cmd
     assert "Hidden" in cmd
     assert kwargs["creationflags"] == 0x08000000
+    assert "Prepare-PaymentImage" in script
+    assert "$maxDimension = 2400.0" in script
 
 
 def test_windows_tax_verification_ocr_runs_powershell_hidden(monkeypatch, tmp_path):

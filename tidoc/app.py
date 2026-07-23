@@ -67,6 +67,12 @@ def web_dir() -> Path:
     return candidates[0]
 
 
+def web_app_url(index: Path | None = None) -> str:
+    """入口必须保持纯 file URI；Windows WebView2 会把查询参数当作文件名。"""
+    page = index or (web_dir() / "index.html")
+    return page.as_uri()
+
+
 def main() -> None:
     _install_native_stderr_filter()
     from .db.paths import resolve_data_root
@@ -74,7 +80,7 @@ def main() -> None:
     index = web_dir() / "index.html"
     window = webview.create_window(
         "tidoc",
-        url=index.as_uri(),
+        url=web_app_url(index),
         js_api=api,
         width=1160,
         height=780,

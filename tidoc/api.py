@@ -33,6 +33,8 @@ from .db import (
 )
 
 AUTO_UPDATE_PREF_KEY = "tidoc.update.autoCheck"
+PAYMENT_OCR_PREF_KEY = "tidoc.paymentScreenshotOcr"
+DEFAULT_PAID_TO_INVOICE_PREF_KEY = "tidoc.defaultPaidToInvoiceTotal"
 UPDATE_LAST_CHECK_KEY = "tidoc.update.lastCheck"
 UPDATE_LAST_RESULT_KEY = "tidoc.update.lastResult"
 APP_LAST_SEEN_VERSION_KEY = "tidoc.update.lastSeenVersion"
@@ -155,7 +157,13 @@ class Api:
         parsed = None
         if xml_path or pdf_path:
             parsed = parse_invoice_files(xml_path, pdf_path)
-        entry_id = self.entries.create(profile_id, title=title, parsed=parsed, status=status)
+        entry_id = self.entries.create(
+            profile_id,
+            title=title,
+            parsed=parsed,
+            status=status,
+            default_paid_to_total=self._default_paid_to_invoice(),
+        )
 
         if parsed:
             check = check_invoice(parsed, expected_title=title)
@@ -265,7 +273,8 @@ class Api:
                             warning = "未识别到发票号码"
                 elif suffix in image_ext:
                     att_type = TYPE_PAYMENT
-                    paid_amount = extract_payment_image_amount(path)
+                    if self._payment_ocr_enabled():
+                        paid_amount = extract_payment_image_amount(path)
             except Exception as exc:  # noqa: BLE001 - 分类阶段只提示，后续添加时仍会校验
                 warning = str(exc)
             out.append({
@@ -294,7 +303,9 @@ class Api:
         candidate_ids = {str(value) for value in (candidate_entry_ids or []) if value}
         if candidate_ids:
             entries = [entry for entry in entries if entry.get("id") in candidate_ids]
-        return suggest_material_bindings(infos or [], entries)
+        return suggest_material_bindings(
+            infos or [], entries, payment_ocr_enabled=self._payment_ocr_enabled()
+        )
 
     @_guard
     def batch_create_entries(self, profile_id, groups, title=""):
@@ -324,7 +335,13 @@ class Api:
                     ).fetchone()
                     if old:
                         raise ValueError("这张发票已导入过")
-                entry_id = self.entries.create(profile_id, title=title, parsed=parsed, status="draft")
+                entry_id = self.entries.create(
+                    profile_id,
+                    title=title,
+                    parsed=parsed,
+                    status="draft",
+                    default_paid_to_total=self._default_paid_to_invoice(),
+                )
                 check = check_invoice(parsed, expected_title=title)
                 self.entries.set_check(entry_id, check.status, check.message)
                 for f in invoice_files:
@@ -365,6 +382,14 @@ class Api:
     @_guard
     def update_entry_profile(self, entry_id, profile_id, operator_profile_id=""):
         return self.entries.set_profile(entry_id, profile_id, operator_profile_id)
+
+    @_guard
+    def update_entry_profiles(self, entry_ids, profile_id, operator_profile_id=""):
+        return {
+            "changed": self.entries.set_profiles(
+                entry_ids or [], profile_id, operator_profile_id
+            )
+        }
 
     @_guard
     def set_status(self, entry_id, status):
@@ -478,7 +503,7 @@ class Api:
         options = options or {}
         self._validate_attachment_for_entry(entry_id, src_path, att_type)
         att = self.attachments.add(entry_id, src_path, att_type, note)
-        if att_type == TYPE_PAYMENT:
+        if att_type == TYPE_PAYMENT and not options.get("skip_payment_ocr", False):
             amount, applied = self._maybe_apply_payment_ocr_amount(
                 entry_id,
                 src_path,
@@ -572,6 +597,8 @@ class Api:
     def _maybe_apply_payment_ocr_amount(self, entry_id, src_path, apply: bool = True) -> tuple[str, bool]:
         from .services.folder_import import extract_payment_image_amount
 
+        if not self._payment_ocr_enabled():
+            return "", False
         amount = extract_payment_image_amount(src_path)
         if not amount:
             return "", False
@@ -890,6 +917,12 @@ class Api:
     def _preference_value(self, key: str, default: str = "") -> str:
         row = self.db.conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
         return row["value"] if row else default
+
+    def _payment_ocr_enabled(self) -> bool:
+        return self._preference_value(PAYMENT_OCR_PREF_KEY, "1") != "0"
+
+    def _default_paid_to_invoice(self) -> bool:
+        return self._preference_value(DEFAULT_PAID_TO_INVOICE_PREF_KEY, "1") != "0"
 
     def _set_preference_value(self, key: str, value: str) -> None:
         self.db.conn.execute(

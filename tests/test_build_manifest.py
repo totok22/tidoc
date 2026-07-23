@@ -49,3 +49,25 @@ def test_build_manifest_uses_structured_release_notes(tmp_path):
 
     manifest = json.loads((release / "manifest.json").read_text("utf-8"))
     assert manifest["components"]["core"]["notes"] == ["更新界面", "减少启动检查频率"]
+
+
+def test_set_version_updates_frontend_asset_cache_keys(tmp_path):
+    (tmp_path / "tidoc" / "web").mkdir(parents=True)
+    (tmp_path / "tidoc_print").mkdir()
+    (tmp_path / "tidoc" / "__init__.py").write_text('__version__ = "0.1.0"\n', "utf-8")
+    (tmp_path / "tidoc_print" / "__init__.py").write_text('__version__ = "0.1.0"\n', "utf-8")
+    index = tmp_path / "tidoc" / "web" / "index.html"
+    index.write_text(
+        '<link href="styles.css?v=0.1.0"><script src="api.js?v=0.1.0"></script>'
+        '<script src="app.js?v=0.1.0"></script>',
+        "utf-8",
+    )
+    script = Path(__file__).resolve().parents[1] / "scripts" / "set_version.py"
+
+    subprocess.run([sys.executable, str(script), "9.8.7"], cwd=tmp_path, check=True)
+
+    assert '__version__ = "9.8.7"' in (tmp_path / "tidoc" / "__init__.py").read_text("utf-8")
+    updated = index.read_text("utf-8")
+    assert "styles.css?v=9.8.7" in updated
+    assert "api.js?v=9.8.7" in updated
+    assert "app.js?v=9.8.7" in updated
