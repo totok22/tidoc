@@ -23,29 +23,45 @@ from ..db.attachments import (
 )
 from ..db.entries import EntryRepo
 from ..db.profiles import ProfileRepo
-from .updater import print_component_executable
+from .updater import COMPONENT_PRINT, installed_component_info
 
 
 def component_status(components_dir: str | Path | None = None) -> dict:
     """打印组件是否可用 + 缺哪些依赖。核心据此决定入口是否置灰。"""
-    external = print_component_executable(components_dir) if components_dir else None
-    try:
-        import tidoc_print
-    except Exception as exc:  # noqa: BLE001
-        if external:
-            return {"available": True, "mode": "external", "path": str(external), "missing": []}
-        return {"available": False, "mode": "missing", "missing": ["tidoc_print"], "error": str(exc)}
-    available = tidoc_print.is_available()
-    if available:
-        return {"available": True, "mode": "python", "missing": []}
+    installed = (
+        installed_component_info(components_dir, COMPONENT_PRINT)
+        if components_dir
+        else {"marker_exists": False, "needs_repair": False, "issue": ""}
+    )
+    external = Path(installed["executable"]) if installed.get("valid") else None
     if external:
         return {
             "available": True,
             "mode": "external",
             "path": str(external),
+            "version": installed.get("version", ""),
             "missing": [],
-            "python_missing": tidoc_print.missing_dependencies(),
         }
+
+    # A packaged core must never fall back to the tidoc_print package fragment
+    # that PyInstaller may have discovered while analysing this adapter.  The
+    # heavy dependencies belong exclusively to the external component.
+    if getattr(sys, "frozen", False):
+        return {
+            "available": False,
+            "mode": "repair" if installed.get("needs_repair") else "missing",
+            "missing": ["打印导出组件"],
+            "needs_repair": bool(installed.get("needs_repair")),
+            "error": installed.get("issue") or "打印导出组件未安装",
+        }
+
+    try:
+        import tidoc_print
+    except Exception as exc:  # noqa: BLE001
+        return {"available": False, "mode": "missing", "missing": ["tidoc_print"], "error": str(exc)}
+    available = tidoc_print.is_available()
+    if available:
+        return {"available": True, "mode": "python", "missing": []}
     return {"available": False, "mode": "python", "missing": tidoc_print.missing_dependencies()}
 
 

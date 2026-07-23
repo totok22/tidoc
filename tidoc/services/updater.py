@@ -129,13 +129,81 @@ def get_platform_asset(manifest: dict[str, Any], component: str, plat: str | Non
 
 
 def installed_component_version(components_dir: str | Path, component: str, plat: str | None = None) -> str:
+    """Return the installed version only when its recorded executable is usable."""
+    info = installed_component_info(components_dir, component, plat)
+    return info["version"] if info["valid"] else ""
+
+
+def installed_component_info(
+    components_dir: str | Path,
+    component: str,
+    plat: str | None = None,
+) -> dict[str, Any]:
+    """Inspect a component marker and verify the installed executable.
+
+    A marker on its own is not proof of an installation: users may remove the
+    version directory, security software may quarantine the executable, or a
+    previous install may have stopped halfway through.
+    """
     marker = _component_root(components_dir, component, plat) / "current.json"
     if not marker.exists():
-        return ""
+        return {
+            "marker_exists": False,
+            "valid": False,
+            "needs_repair": False,
+            "version": "",
+            "executable": "",
+            "issue": "not_installed",
+        }
     try:
-        return json.loads(marker.read_text("utf-8")).get("version") or ""
+        data = json.loads(marker.read_text("utf-8"))
     except Exception:
-        return ""
+        return {
+            "marker_exists": True,
+            "valid": False,
+            "needs_repair": True,
+            "version": "",
+            "executable": "",
+            "issue": "invalid_marker",
+        }
+
+    version = data.get("version") or ""
+    executable_value = data.get("executable") or ""
+    executable = Path(executable_value) if executable_value else None
+    if not version or executable is None or not executable.is_file():
+        return {
+            "marker_exists": True,
+            "valid": False,
+            "needs_repair": True,
+            "version": version,
+            "executable": executable_value,
+            "issue": "missing_executable",
+        }
+
+    expected_installed_hash = (data.get("installed_sha256") or "").lower()
+    if expected_installed_hash:
+        try:
+            actual_installed_hash = sha256_file(executable).lower()
+        except OSError:
+            actual_installed_hash = ""
+        if actual_installed_hash != expected_installed_hash:
+            return {
+                "marker_exists": True,
+                "valid": False,
+                "needs_repair": True,
+                "version": version,
+                "executable": str(executable),
+                "issue": "checksum_mismatch",
+            }
+
+    return {
+        "marker_exists": True,
+        "valid": True,
+        "needs_repair": False,
+        "version": version,
+        "executable": str(executable),
+        "issue": "",
+    }
 
 
 def downloaded_core_update_info(updates_dir: str | Path, plat: str | None = None) -> dict[str, Any]:
@@ -175,10 +243,19 @@ def check_updates(
             continue
         if name == COMPONENT_CORE:
             current = CORE_VERSION
+            component_info: dict[str, Any] = {}
         else:
-            current = installed_component_version(components_dir, name, plat)
+            component_info = installed_component_info(components_dir, name, plat)
+            current = component_info["version"] if component_info["valid"] else ""
         latest = asset.get("version") or ""
-        available = bool(latest and (not current or version_gt(latest, current)))
+        available = bool(
+            latest
+            and (
+                not current
+                or version_gt(latest, current)
+                or component_info.get("needs_repair", False)
+            )
+        )
         downloaded: dict[str, Any] = {}
         if name == COMPONENT_CORE and updates_dir is not None:
             candidate = downloaded_core_update_info(updates_dir, plat)
@@ -187,9 +264,12 @@ def check_updates(
         result["updates"].append({
             "component": name,
             "name": asset.get("name") or name,
-            "current_version": current,
+            "current_version": component_info.get("version", current),
             "latest_version": latest,
             "available": available,
+            "installed_valid": component_info.get("valid", True),
+            "needs_repair": component_info.get("needs_repair", False),
+            "install_issue": component_info.get("issue", ""),
             "downloaded": bool(downloaded),
             "downloaded_path": downloaded.get("file_path", ""),
             "state": "current" if not available else ("downloaded" if downloaded else "available"),
@@ -305,6 +385,7 @@ def install_print_component(
         "executable": str(executable),
         "source": asset.get("url") or "",
         "sha256": asset.get("sha256") or "",
+        "installed_sha256": sha256_file(executable),
     }
     marker_path = _component_root(components_dir, COMPONENT_PRINT, asset.get("platform")).joinpath("current.json")
     marker_path.parent.mkdir(parents=True, exist_ok=True)
@@ -321,14 +402,8 @@ def install_print_component(
 
 
 def print_component_executable(components_dir: str | Path, plat: str | None = None) -> Path | None:
-    marker = _component_root(components_dir, COMPONENT_PRINT, plat).joinpath("current.json")
-    if not marker.exists():
-        return None
-    try:
-        exe = Path(json.loads(marker.read_text("utf-8")).get("executable") or "")
-    except Exception:
-        return None
-    return exe if exe.exists() else None
+    info = installed_component_info(components_dir, COMPONENT_PRINT, plat)
+    return Path(info["executable"]) if info["valid"] else None
 
 
 def _component_root(components_dir: str | Path, component: str, plat: str | None = None) -> Path:

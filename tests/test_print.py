@@ -1,6 +1,9 @@
 """打印导出组件测试：PDF 拼接、图片转 PDF、Word 生成、抬头强隔离。"""
 
 import glob
+import json
+import subprocess
+import sys
 from decimal import Decimal
 
 import pytest
@@ -23,6 +26,18 @@ def _sample(pattern):
 def test_availability():
     assert tidoc_print.is_available()
     assert tidoc_print.missing_dependencies() == []
+
+
+def test_component_self_test_imports_full_print_stack():
+    proc = subprocess.run(
+        [sys.executable, "-m", "tidoc_print", "--self-test"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout)["ok"] is True
 
 
 def test_merge_pdfs(tmp_path):

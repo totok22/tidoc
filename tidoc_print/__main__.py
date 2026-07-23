@@ -11,14 +11,29 @@ import traceback
 from decimal import Decimal
 from pathlib import Path
 
-from . import PersonProfile, PrintEntry, PrintItem, PrintOptions, build_print_package
+# Keep these imports explicit.  The public package exports them lazily via
+# __getattr__, which PyInstaller cannot reliably discover when building the
+# standalone component.
+from .builder import PrintOptions, build_print_package
+from .models import PersonProfile, PrintEntry, PrintItem
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(prog="tidoc_print")
-    parser.add_argument("--input", required=True, help="核心传入的 JSON payload")
-    parser.add_argument("--result", required=True, help="组件写出的 JSON 结果")
+    parser.add_argument("--input", help="核心传入的 JSON payload")
+    parser.add_argument("--result", help="组件写出的 JSON 结果")
+    parser.add_argument(
+        "--self-test",
+        action="store_true",
+        help="验证打印组件及其依赖可以正常导入",
+    )
     args = parser.parse_args()
+
+    if args.self_test:
+        print(json.dumps({"ok": True, "component": "tidoc_print"}))
+        return 0
+    if not args.input or not args.result:
+        parser.error("--input 和 --result 必须同时提供")
 
     result_path = Path(args.result)
     try:

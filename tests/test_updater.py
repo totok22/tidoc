@@ -10,6 +10,9 @@ from tidoc.services.updater import (
     check_updates,
     download_update,
     downloaded_core_update_info,
+    install_print_component,
+    installed_component_info,
+    installed_component_version,
     load_manifest,
     open_downloaded_core_update,
     parse_version,
@@ -61,6 +64,151 @@ def test_check_updates_from_file_manifest(tmp_path):
     updates = {item["component"]: item for item in status["updates"]}
     assert updates["core"]["available"] is False
     assert updates["print"]["available"] is True
+
+
+def test_missing_component_executable_is_reported_as_repairable(tmp_path):
+    components = tmp_path / "components"
+    marker = components / "print" / "windows" / "current.json"
+    marker.parent.mkdir(parents=True)
+    marker.write_text(json.dumps({
+        "component": "print",
+        "version": "0.2.0",
+        "platform": "windows",
+        "executable": str(marker.parent / "0.2.0" / "tidoc_print.exe"),
+        "installed_sha256": "0" * 64,
+    }), "utf-8")
+
+    info = installed_component_info(components, "print", "windows")
+
+    assert info["valid"] is False
+    assert info["needs_repair"] is True
+    assert info["issue"] == "missing_executable"
+    assert installed_component_version(components, "print", "windows") == ""
+
+
+def test_check_updates_offers_repair_when_recorded_component_is_missing(tmp_path):
+    components = tmp_path / "components"
+    marker = components / "print" / "windows" / "current.json"
+    marker.parent.mkdir(parents=True)
+    marker.write_text(json.dumps({
+        "component": "print",
+        "version": "0.2.0",
+        "platform": "windows",
+        "executable": str(marker.parent / "0.2.0" / "tidoc_print.exe"),
+    }), "utf-8")
+    manifest = {
+        "components": {
+            "print": {
+                "name": "打印导出组件",
+                "latest": "0.2.0",
+                "platforms": {
+                    "windows": {
+                        "url": "https://example.com/tidoc_print.exe",
+                        "sha256": "0" * 64,
+                    }
+                },
+            }
+        }
+    }
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest), "utf-8")
+
+    status = check_updates(components, manifest_path.as_uri(), plat="windows")
+    item = status["updates"][0]
+
+    assert item["current_version"] == "0.2.0"
+    assert item["available"] is True
+    assert item["needs_repair"] is True
+    assert item["state"] == "available"
+
+
+def test_component_checksum_mismatch_requires_repair(tmp_path):
+    executable = tmp_path / "components" / "print" / "windows" / "0.2.0" / "tidoc_print.exe"
+    executable.parent.mkdir(parents=True)
+    executable.write_bytes(b"damaged")
+    marker = executable.parents[1] / "current.json"
+    marker.write_text(json.dumps({
+        "component": "print",
+        "version": "0.2.0",
+        "platform": "windows",
+        "executable": str(executable),
+        "installed_sha256": "0" * 64,
+    }), "utf-8")
+
+    info = installed_component_info(tmp_path / "components", "print", "windows")
+
+    assert info["valid"] is False
+    assert info["needs_repair"] is True
+    assert info["issue"] == "checksum_mismatch"
+
+
+def test_print_install_records_and_validates_installed_executable(tmp_path):
+    artifact = tmp_path / "tidoc_print.exe"
+    artifact.write_bytes(b"print-component")
+    manifest = {
+        "components": {
+            "print": {
+                "name": "打印导出组件",
+                "latest": "0.2.0",
+                "platforms": {
+                    "windows": {
+                        "url": artifact.as_uri(),
+                        "sha256": sha256_file(artifact),
+                        "filename": artifact.name,
+                        "format": "exe",
+                        "executable_name": artifact.name,
+                    }
+                },
+            }
+        }
+    }
+    components = tmp_path / "components"
+
+    result = install_print_component(
+        manifest,
+        components,
+        tmp_path / "updates",
+        plat="windows",
+    )
+    info = installed_component_info(components, "print", "windows")
+
+    assert result.installed_path is not None
+    assert info["valid"] is True
+    assert info["version"] == "0.2.0"
+    assert installed_component_version(components, "print", "windows") == "0.2.0"
+
+
+def test_frozen_core_does_not_treat_bundled_package_fragment_as_component(monkeypatch, tmp_path):
+    from tidoc.services import printing
+
+    monkeypatch.setattr(printing.sys, "frozen", True, raising=False)
+
+    status = printing.component_status(tmp_path / "components")
+
+    assert status["available"] is False
+    assert status["mode"] == "missing"
+
+
+def test_frozen_core_reports_removed_component_as_needing_repair(monkeypatch, tmp_path):
+    from tidoc.services import printing
+
+    components = tmp_path / "components"
+    marker = components / "print" / "windows" / "current.json"
+    marker.parent.mkdir(parents=True)
+    marker.write_text(json.dumps({
+        "component": "print",
+        "version": "0.2.0",
+        "platform": "windows",
+        "executable": str(marker.parent / "0.2.0" / "tidoc_print.exe"),
+    }), "utf-8")
+    monkeypatch.setattr(printing.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(printing.sys, "platform", "win32")
+
+    status = printing.component_status(components)
+
+    assert status["available"] is False
+    assert status["mode"] == "repair"
+    assert status["needs_repair"] is True
 
 
 def test_core_download_records_pending_install_state(tmp_path):

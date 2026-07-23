@@ -84,6 +84,9 @@ jobs:
           --add-data "tidoc_print/templates;tidoc_print/templates"
           scripts/tidoc_print_entry.py
 
+      - name: Smoke-test Windows print component
+        run: .\dist\tidoc_print.exe --self-test
+
       - name: Collect Windows artifacts
         shell: bash
         run: |
@@ -151,6 +154,9 @@ jobs:
           --collect-submodules tidoc_print
           --add-data "tidoc_print/templates:tidoc_print/templates"
           scripts/tidoc_print_entry.py
+
+      - name: Smoke-test macOS print component
+        run: dist/tidoc_print --self-test
 
       - name: Zip macOS print component
         run: |

@@ -2124,10 +2124,16 @@ async function openUpdateDialog() {
       let state = available ? '<span class="update-badge available">可更新</span>' : '<span class="update-badge current">已是最新</span>';
       let action = '';
       if (u.component === 'print') {
-        state = available
-          ? `<span class="update-badge available">${u.current_version ? '可更新' : '可安装'}</span>`
-          : '<span class="update-badge current">已安装</span>';
-        action = available ? `<button class="btn small" data-install-print>${u.current_version ? '更新组件' : '安装组件'}</button>` : '';
+        if (u.needs_repair) {
+          state = '<span class="update-badge available">需要修复</span>';
+          action = '<button class="btn small" data-install-print>修复组件</button>';
+        } else if (available) {
+          state = `<span class="update-badge available">${u.current_version ? '可更新' : '可安装'}</span>`;
+          action = `<button class="btn small" data-install-print>${u.current_version ? '更新组件' : '安装组件'}</button>`;
+        } else {
+          state = '<span class="update-badge current">已安装</span>';
+          action = '<button class="btn small ghost" data-install-print>重新安装</button>';
+        }
       } else if (!available) {
         action = '';
       } else if (u.downloaded) {
@@ -3604,12 +3610,13 @@ async function openPrintDialog(ids) {
 
   if (!status.available) {
     let m;
+    const needsRepair = !!status.needs_repair;
     m = modal({
-      title: '打印导出组件未安装',
-      body: `<div class="hint warn">安装打印导出组件后即可继续。</div>`,
+      title: needsRepair ? '打印导出组件需要修复' : '打印导出组件未安装',
+      body: `<div class="hint warn">${needsRepair ? '组件文件缺失或损坏，请重新安装后继续。' : '安装打印导出组件后即可继续。'}</div>`,
       footer: [
         mkBtn('取消', 'ghost', () => m.close()),
-        mkBtn('安装组件', 'primary', () => { m.close(); openUpdateDialog(); }),
+        mkBtn(needsRepair ? '修复组件' : '安装组件', 'primary', () => { m.close(); openUpdateDialog(); }),
       ],
     });
     return;
