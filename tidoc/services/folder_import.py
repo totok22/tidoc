@@ -598,6 +598,45 @@ def _pdf_probe_text(path: Path) -> str:
         return ""
 
 
+def _pdf_invoice_numbers(path: Path) -> set[str]:
+    """Return distinct invoice numbers represented by a PDF.
+
+    Count numbers tied to the ``发票号码`` metadata field, plus the invoice
+    number parsed from each invoice-looking page.  Do not count every 20-digit
+    run in the document: bank accounts can also be 20 digits long.
+    """
+    try:
+        from pypdf import PdfReader
+
+        reader = PdfReader(path)
+        numbers: set[str] = set()
+        metadata_chunks: list[str] = []
+        if reader.metadata:
+            for value in reader.metadata.values():
+                if isinstance(value, bytes):
+                    for enc in ("utf-8", "gb18030"):
+                        try:
+                            metadata_chunks.append(value.decode(enc, errors="ignore"))
+                            break
+                        except Exception:
+                            continue
+                elif value:
+                    metadata_chunks.append(str(value))
+        metadata_text = "\n".join(metadata_chunks)
+        numbers.update(_LABELED_INVOICE_NO_RE.findall(metadata_text))
+
+        for page in reader.pages:
+            text = page.extract_text() or ""
+            if not _looks_like_invoice_pdf_text(text):
+                continue
+            invoice_no = _invoice_no_from_text(text)
+            if invoice_no:
+                numbers.add(invoice_no)
+        return numbers
+    except Exception:
+        return set()
+
+
 def _match_xml(pdf: dict, xmls: list[dict], used: set[int]) -> int | None:
     pdf_no = pdf.get("invoice_no") or _invoice_no_from_name(Path(pdf["path"]))
     if pdf_no:
@@ -648,7 +687,7 @@ def _scan_file_paths(file_paths: list[Path]) -> dict:
         suffix = entry.suffix.lower()
         if suffix == ".pdf":
             total += 1
-            probe_invoice_nos = set(re.findall(r"(?<!\d)\d{20}(?!\d)", _pdf_probe_text(entry)))
+            probe_invoice_nos = _pdf_invoice_numbers(entry)
             if len(probe_invoice_nos) > 1:
                 ignored.append(_file_info(
                     entry,

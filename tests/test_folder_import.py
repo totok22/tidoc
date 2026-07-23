@@ -103,6 +103,26 @@ def test_scan_folder_skips_pdf_containing_multiple_invoices(tmp_path):
     assert "包含 2 张发票" in r["ignored"][0]["warning"]
 
 
+def test_single_invoice_pdf_does_not_count_bank_account_as_second_invoice(tmp_path):
+    from pypdf import PdfWriter
+
+    pdf = tmp_path / "220+发票.pdf"
+    writer = PdfWriter()
+    writer.add_blank_page(width=842, height=595)
+    writer.add_metadata({
+        "/Title": "电子发票（普通发票） 发票号码：26332000006299955796",
+        "/Subject": "销方开户银行：中国建设银行；银行账号：33050163744100000448",
+    })
+    with pdf.open("wb") as f:
+        writer.write(f)
+
+    r = scan_folder(tmp_path)
+
+    assert r["invoice_pdf_count"] == 1
+    assert len(r["groups"]) == 1
+    assert not r["ignored"]
+
+
 def test_scan_folder_skips_duplicate_invoice_number_groups(tmp_path, monkeypatch):
     from pypdf import PdfWriter
     from tidoc.services import folder_import
