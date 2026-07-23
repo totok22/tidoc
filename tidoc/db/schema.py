@@ -17,8 +17,9 @@ from __future__ import annotations
 
 import sqlite3
 
-# v1：初版；v2：新增 batches / batch_entries（运营组批次）。
-SCHEMA_VERSION = 2
+# v1：初版；v2：新增 batches / batch_entries（运营组批次）；
+# v3：明细识别合计不一致从 blocked 降为 warning。
+SCHEMA_VERSION = 3
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -157,10 +158,38 @@ def init_db(conn: sqlite3.Connection) -> None:
     已有表与数据不动。schema_version 记录当前版本，供后续按需迁移列。
     """
     conn.executescript(SCHEMA)
-    conn.execute(
-        "INSERT OR IGNORE INTO meta(key, value) VALUES('schema_version', ?)",
-        (str(SCHEMA_VERSION),),
-    )
+    version_row = conn.execute(
+        "SELECT value FROM meta WHERE key = 'schema_version'"
+    ).fetchone()
+    previous_version = int(version_row[0]) if version_row else SCHEMA_VERSION
+    if version_row is None:
+        conn.execute(
+            "INSERT INTO meta(key, value) VALUES('schema_version', ?)",
+            (str(SCHEMA_VERSION),),
+        )
+
+    if previous_version < 3:
+        # 历史条目可能仅因明细漏识别而被标成 blocked。抬头分区冲突仍保持
+        # blocked；这里只迁移没有分区冲突的纯明细合计问题。
+        conn.execute(
+            """
+            UPDATE entries
+               SET check_status = 'warning',
+                   check_message = REPLACE(
+                       REPLACE(
+                           check_message,
+                           '发票总额与明细合计相差',
+                           '明细识别合计与发票总额相差'
+                       ),
+                       '请核对明细或总额。',
+                       '可能是明细识别不完整，请以发票总额为准。'
+                   )
+             WHERE check_status = 'blocked'
+               AND check_message LIKE '发票总额与明细合计相差%'
+               AND check_message NOT LIKE '%与当前分区%'
+            """
+        )
+
     # 历史库升级：把 schema_version 抬到当前版本（新表已由上面的 executescript 补齐）。
     conn.execute(
         "UPDATE meta SET value = ? WHERE key = 'schema_version' AND CAST(value AS INTEGER) < ?",

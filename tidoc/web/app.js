@@ -22,7 +22,6 @@ const State = {
   multiClaimantMode: false,
   activeDetailEntryId: null,
   updateStatus: null,
-  recentImportedEntryIds: [],
 };
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -2544,7 +2543,6 @@ function openBatchImportPreview(scan, sourceLabel, options = {}) {
         const progress = taskProgress(`正在创建 ${payload.length} 个报账条目…`);
         try {
           const r = await Api.batchCreateEntries(selectedClaimantId(body), payload);
-          State.recentImportedEntryIds = r.entry_ids || [];
           if (pendingMaterialInfos.length) progress.update('正在识别并匹配随附材料…');
           const bind = pendingMaterialInfos.length
             ? await autoBindMaterialInfos(pendingMaterialInfos, r.created_entries || [])
@@ -3111,7 +3109,9 @@ async function autoBindMaterialInfos(infos, extraEntries = []) {
 
 async function handleLooseMaterialInfos(infos, cleanupPaths) {
   if (!infos.length) return false;
-  const bind = await autoBindMaterialInfos(infos, State.recentImportedEntryIds);
+  // 独立拖入或粘贴的材料应在全部条目中匹配。只有与一批发票同时导入的
+  // 材料才由 openBatchImportPreview 显式限定到本次新建条目。
+  const bind = await autoBindMaterialInfos(infos);
   const manualPaths = new Set(bind.manual.map((info) => info.path));
   await cleanupDroppedPaths((cleanupPaths || infos.map((info) => info.path)).filter((p) => !manualPaths.has(p)));
   if (bind.auto.length) {

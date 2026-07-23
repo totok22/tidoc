@@ -209,7 +209,7 @@ def test_modified_view_only_tracks_paid_amount_difference(repos, sample_xmls):
 
 # ------------------------------------------------------------------ 迁移
 
-def test_v1_db_upgrades_to_v2(tmp_path):
+def test_v1_db_upgrades_to_latest_schema(tmp_path):
     """模拟一个只有 v1 表的旧库，打开后应补齐批次表并抬升版本号。"""
     db_path = tmp_path / "old.sqlite"
     conn = sqlite3.connect(str(db_path))
@@ -229,11 +229,52 @@ def test_v1_db_upgrades_to_v2(tmp_path):
 
     db = Database(db_path)  # init_db 应升级
     ver = db.conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0]
-    assert ver == "2"
+    assert ver == "3"
     # 批次表可用
     repo = BatchRepo(db)
     b = repo.create("迁移后批次")
     assert b["count"] == 0
+
+
+def test_v2_migration_downgrades_only_item_recognition_mismatch(tmp_path):
+    db_path = tmp_path / "old.sqlite"
+    db = Database(db_path)
+    db.conn.execute("UPDATE meta SET value = '2' WHERE key = 'schema_version'")
+    db.conn.execute(
+        "INSERT INTO profiles(id, name, reviewer, is_default, created_at) "
+        "VALUES('p1', '张三', '李老师', 1, '')"
+    )
+    common = (
+        "INSERT INTO entries("
+        "id, profile_id, title, status, check_status, check_message, created_at, updated_at"
+        ") VALUES(?, 'p1', '', 'partial', 'blocked', ?, '', '')"
+    )
+    db.conn.execute(
+        common,
+        ("item-only", "发票总额与明细合计相差 ¥10.00，请核对明细或总额。"),
+    )
+    db.conn.execute(
+        common,
+        (
+            "title-conflict",
+            "发票总额与明细合计相差 ¥10.00，请核对明细或总额。；"
+            "发票抬头为「A」，与当前分区「B」不一致，禁止混入。",
+        ),
+    )
+    db.conn.commit()
+    db.close()
+
+    migrated = Database(db_path)
+    rows = {
+        row["id"]: (row["check_status"], row["check_message"])
+        for row in migrated.conn.execute(
+            "SELECT id, check_status, check_message FROM entries"
+        ).fetchall()
+    }
+
+    assert rows["item-only"][0] == "warning"
+    assert "明细识别不完整" in rows["item-only"][1]
+    assert rows["title-conflict"][0] == "blocked"
 
 
 # ------------------------------------------------------------------ 数据目录迁移

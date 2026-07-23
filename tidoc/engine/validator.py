@@ -20,20 +20,23 @@ SUPPORTED_TITLES = (TITLE_UNIVERSITY, TITLE_FOUNDATION)
 def check_invoice(invoice: ParsedInvoice, expected_title: str = "") -> CheckResult:
     """对单张发票做金额闭合与抬头校验，返回 pass / warning / blocked。
 
-    - blocked：发票总额与明细合计对不上，或抬头与所属分区不一致（会造成串账）。
-    - warning：缺明细、抬头无法识别等，需要人工确认但不必然阻断。
+    - blocked：抬头与所属分区不一致（会造成串账）。
+    - warning：明细识别合计与发票总额不一致、缺明细、抬头无法识别等；
+      这些通常是识别完整性问题，不阻断材料齐备。
     - pass：全部通过。
     """
     problems_blocked: list[str] = []
     problems_warning: list[str] = []
 
-    # 金额闭合：价税合计 == 各明细含税金额之和
+    # 明细金额仅用于提示识别完整性。发票总额取自票面关键信息，明细漏识别
+    # 不应阻断后续材料整理、导出和打印。
     if invoice.items:
         item_sum = sum((item.total for item in invoice.items), Decimal("0"))
         diff = money(invoice.total - item_sum)
         if diff != Decimal("0.00"):
-            problems_blocked.append(
-                f"发票总额与明细合计相差 {fmt_money(diff)}，请核对明细或总额。"
+            problems_warning.append(
+                f"明细识别合计与发票总额相差 {fmt_money(diff)}，"
+                "可能是明细识别不完整，请以发票总额为准。"
             )
     else:
         problems_warning.append("未能自动识别物品明细，请确认或补充。")

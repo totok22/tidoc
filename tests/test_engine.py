@@ -5,6 +5,7 @@ from decimal import Decimal
 from tidoc.engine import (
     CHECK_BLOCKED,
     CHECK_PASS,
+    CHECK_WARNING,
     ParsedInvoice,
     ParsedItem,
     check_invoice,
@@ -167,14 +168,15 @@ def test_check_pass():
     assert check_invoice(inv).status == CHECK_PASS
 
 
-def test_check_blocked_on_mismatch():
+def test_item_sum_mismatch_is_non_blocking_recognition_warning():
     inv = ParsedInvoice(
         invoice_no="1", total=Decimal("100.00"), buyer_name="北京理工大学",
         items=[ParsedItem("*x*甲", "甲", "个", Decimal("1"), Decimal("90.00"))],
     )
     r = check_invoice(inv)
-    assert r.status == CHECK_BLOCKED
+    assert r.status == CHECK_WARNING
     assert "相差" in r.message
+    assert "请以发票总额为准" in r.message
 
 
 def test_check_title_isolation():
